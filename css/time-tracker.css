@@ -1,0 +1,345 @@
+/* time‑tracker.css
+   ——————————————
+   Responsive Hours‑Worked & PTO grids
+   Mobile → Tablet → Desktop
+*/
+
+/*─────────────────────────────────────────────────
+  1) Container & Base Table Styles
+─────────────────────────────────────────────────*/
+#tt-container {
+  width: 100%;
+  padding: 1rem;
+  box-sizing: border-box;
+  overflow-x: auto;
+}
+
+.tt-table-wrapper {
+  width: 90%;
+  max-width: 900px;
+  margin: 2rem auto;
+  overflow-x: auto;
+  box-sizing: border-box;
+}
+
+.tt-table-wrapper table {
+  width: 100% !important;
+  border-collapse: collapse !important;
+  background: #fff;
+}
+
+.tt-table-wrapper th,
+.tt-table-wrapper td {
+  border: 1px solid #ddd !important;
+  padding: 0.75rem !important;
+  vertical-align: middle;
+}
+
+.tt-table-wrapper th {
+  background: #f5f5f5 !important;
+  font-weight: 600 !important;
+  text-align: left !important;
+}
+
+.tt-table-wrapper tbody tr:nth-child(even) {
+  background: #fafafa !important;
+}
+
+/*─────────────────────────────────────────────────
+  2) Mobile‑First (under 768px): Cards
+─────────────────────────────────────────────────*/
+@media (max-width: 767px) {
+  .tt-table-wrapper table thead,
+  .tt-table-wrapper table tfoot {
+    display: none !important;
+  }
+  .tt-table-wrapper tbody tr {
+    display: block !important;
+    border: 1px solid #ddd !important;
+    margin-bottom: 1rem !important;
+    padding: 1rem !important;
+  }
+  .tt-table-wrapper tbody td {
+    display: flex !important;
+    justify-content: space-between !important;
+    padding: 0.5rem 0 !important;
+  }
+  .tt-table-wrapper tbody td:before {
+    content: attr(data-label) ": " !important;
+    font-weight: bold !important;
+    margin-right: 0.5rem !important;
+  }
+}
+
+/*─────────────────────────────────────────────────
+  3) Tablet (768px–1023px): Two‑Column Cards
+─────────────────────────────────────────────────*/
+@media (min-width: 768px) and (max-width: 1023px) {
+  .tt-table-wrapper tbody tr {
+    display: grid !important;
+    grid-template-columns: repeat(2, 1fr) !important;
+    grid-gap: 1rem !important;
+    border: 1px solid #ddd !important;
+    margin-bottom: 1rem !important;
+    padding: 1rem !important;
+  }
+  .tt-table-wrapper tbody td {
+    display: flex !important;
+    justify-content: space-between !important;
+    padding: 0.5rem 0 !important;
+  }
+  .tt-table-wrapper tbody td:before {
+    content: attr(data-label) ": " !important;
+    font-weight: bold !important;
+  }
+}
+
+/*─────────────────────────────────────────────────
+  4) Desktop (1024px and up): Full Tables
+─────────────────────────────────────────────────*/
+@media (min-width: 1024px) {
+  /* Show header & footer in proper positions */
+  .tt-table-wrapper table thead {
+    display: table-header-group !important;
+  }
+  .tt-table-wrapper table tfoot {
+    display: table-footer-group !important;
+  }
+  .tt-table-wrapper tbody tr {
+    display: table-row !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  .tt-table-wrapper tbody td {
+    display: table-cell !important;
+    padding: 0.75rem !important;
+  }
+  /* PTO select sizing */
+  #pto-grid.widefat select {
+    width: 5rem !important;
+    font-size: 1.5rem !important;
+    padding: 0.25rem !important;
+  }
+
+  /*───────────────────────────────────────────────
+    Sticky PTO table headers (desktop only)
+    Keeps the column labels visible while the user
+    scrolls through the 14 PTO rows. Naturally
+    scrolls away when the table leaves the viewport.
+  ───────────────────────────────────────────────*/
+  #pto-grid {
+    /* sticky on <th> requires separate borders */
+    border-collapse: separate !important;
+    border-spacing: 0 !important;
+  }
+
+  #pto-grid thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: #f5f5f5 !important;
+    /* re-draw borders since collapse is off */
+    box-shadow:
+      inset 0 1px 0 #ddd,
+      inset 0 -1px 0 #ddd,
+      inset 1px 0 0 #ddd,
+      inset -1px 0 0 #ddd;
+  }
+}
+/* In your child theme’s style.css */
+
+.fullwidth-timesheet {
+  width: 100%;
+  max-width: 750px;;  /* override any theme constraints */
+  margin: 0 auto;
+  padding: 4rem;
+}
+
+.fullwidth-timesheet .entry-content {
+  max-width: none;
+}
+
+/*─────────────────────────────────────────────────
+  5) Signature Block
+─────────────────────────────────────────────────*/
+.tt-signature-block {
+  margin-top: 28px;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+
+.tt-signature-block h4 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 700;
+  border-bottom: 2px solid #ddd;
+  padding-bottom: 6px;
+}
+
+.tt-signature-block table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.tt-signature-block th,
+.tt-signature-block td {
+  padding: 9px 14px;
+  border: 1px solid #ddd;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.tt-signature-block thead th {
+  background: #f5f5f5;
+  font-weight: 600;
+}
+
+.tt-signature-block .tt-sig-signed {
+  color: #006622;
+  font-weight: 600;
+}
+
+.tt-signature-block .tt-sig-unsigned {
+  color: #999;
+  font-style: italic;
+}
+
+/* Certification checkbox block */
+.tt-certify-block {
+  margin-top: 20px;
+  margin-bottom: 4px;
+  padding: 14px 16px;
+  border: 1px solid #c3c4c7;
+  border-radius: 6px;
+  background: #f9f9f9;
+  max-width: 900px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.tt-certify-block label {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.tt-certify-block input[type="checkbox"] {
+  margin-top: 3px;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.tt-certify-block .tt-certify-warning {
+  color: #d63638;
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+
+/* Print: keep signature block visible */
+@media print {
+  .tt-signature-block {
+    margin-top: 24px;
+    page-break-inside: avoid;
+  }
+  .tt-certify-block,
+  .tt-submit-actions {
+    display: none !important;
+  }
+}
+
+/*─────────────────────────────────────────────────
+  6) Submit Actions Bar (Clear + Log Out)
+─────────────────────────────────────────────────*/
+.tt-submit-actions {
+  margin-top: 16px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  max-width: 900px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+#tt-logout-btn {
+  margin-left: auto;
+  color: #b32d2e !important;
+  border-color: #b32d2e !important;
+}
+
+#tt-logout-btn:hover {
+  background: #b32d2e !important;
+  color: #fff !important;
+}
+
+#tt-clear-btn {
+  color: #555;
+}
+
+@media (max-width: 600px) {
+  .tt-submit-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  #tt-logout-btn {
+    margin-left: 0;
+    text-align: center;
+  }
+}
+
+@media print {
+  .tt-submit-actions {
+    display: none !important;
+  }
+}
+
+/*─────────────────────────────────────────────────
+  Top-of-page nav bar
+  My Timesheets | Biweekly Employee Entry | Manager Dashboard
+─────────────────────────────────────────────────*/
+.tt-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin: 0 0 1rem 0;
+  padding: 0.6rem 0.75rem;
+  background: #f5f7fa;
+  border: 1px solid #e3e6eb;
+  border-radius: 4px;
+  font-size: 0.95rem;
+}
+
+.tt-nav-link {
+  color: #0073aa;
+  text-decoration: none;
+  font-weight: 500;
+  padding: 2px 4px;
+}
+
+.tt-nav-link:hover,
+.tt-nav-link:focus {
+  text-decoration: underline;
+}
+
+.tt-nav-link--active {
+  color: #222;
+  font-weight: 700;
+  cursor: default;
+}
+
+.tt-nav-sep {
+  color: #aaa;
+  user-select: none;
+}
+
+@media print {
+  .tt-nav {
+    display: none !important;
+  }
+}

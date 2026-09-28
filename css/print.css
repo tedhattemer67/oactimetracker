@@ -1,0 +1,35 @@
+
+/* Ensure PTO grid prints correctly */
+@media print {
+  #pto-grid, #pto-grid th, #pto-grid td {
+    border: 1px solid #000 !important;
+  }
+ .entry-content{max-height:85% !important; max-width: 80% !important;} 
+}
+
+/* Signature block in print / PDF */
+@media print {
+  .tt-signature-block {
+    margin-top: 24px;
+    page-break-inside: avoid;
+  }
+  .tt-signature-block table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+  }
+  .tt-signature-block th,
+  .tt-signature-block td {
+    border: 1px solid #000 !important;
+    padding: 6px 10px;
+  }
+  .tt-signature-block thead th {
+    background: #f0f0f0 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .tt-certify-block,
+  .tt-submit-actions {
+    display: none !important;
+  }
+}

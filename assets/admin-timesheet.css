@@ -1,0 +1,9 @@
+
+#tt-admin-metabox .tt-flex { display:flex; gap:1rem; flex-wrap:wrap; }
+#tt-admin-metabox table.widefat td, 
+#tt-admin-metabox table.widefat th { vertical-align: middle; }
+#tt-admin-grid input[type="number"]{ width: 6em; }
+#tt-admin-grid input[type="time"]{ width: 8.5em; }
+#tt-admin-grid input[type="date"]{ width: 12em; }
+#tt-totals-preview td, #tt-totals-preview th { padding:6px 8px; }
+#tt-totals-preview th { width: 200px; }
