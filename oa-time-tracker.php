@@ -40,6 +40,8 @@ function tt_register_timesheet_cpt(){
     register_post_type('timesheet', [
         'labels'=>['name'=>'Timesheets','singular_name'=>'Timesheet'],
         'public'=>true,'has_archive'=>true,
+        // Timesheets hold employee PII; keep them out of site search results.
+        'exclude_from_search'=>true,
         'rewrite'=>['slug'=>'timesheets'],
         'supports'=>['title','editor'],
     ]);
@@ -235,22 +237,6 @@ function oac_time_tracker_shortcode(){
 // Handle form submission
 add_action('admin_post_submit_timesheet','ttc_handle_submission');
 function ttc_handle_submission(){
-    // Prevent employee editing submitted/approved sheets
-    if(!empty($_POST['timesheet_id'])){
-        $tsid = intval($_POST['timesheet_id']);
-        $existing = get_post($tsid);
-        if($existing && $existing->post_type==='timesheet'){
-            $uid = get_current_user_id();
-            $emp_uid = intval(get_post_meta($tsid,'employee_user_id',true));
-            if(intval($existing->post_author)===$uid || $emp_uid===$uid){
-                $state = get_post_meta($existing->ID,'tt_state',true);
-                if(in_array($state, ['submitted','approved'])){
-                    wp_die('This timesheet has been submitted and is locked.');
-                }
-            }
-        }
-    }
-
     if(!is_user_logged_in()){
         wp_die('You must be logged in to submit a timesheet.');
     }
@@ -334,6 +320,22 @@ function ttc_handle_submission(){
             $q_exist->the_post();
             $existing_id = get_the_ID();
             wp_reset_postdata();
+        }
+    }
+
+    // Prevent editing submitted/approved sheets. Checked against the resolved
+    // $existing_id (not just a posted timesheet_id) so clearing the form's hidden
+    // ID can't be used to overwrite a locked sheet via the pay-period lookup.
+    if($existing_id){
+        $existing_state = get_post_meta($existing_id,'tt_state',true);
+        if(in_array($existing_state, ['submitted','approved'], true)){
+            wp_die(
+                'Your timesheet for this pay period has already been '.esc_html($existing_state).' and is locked. '
+                .($existing_state === 'submitted' ? 'Withdraw the submission first if you need to make changes. ' : '')
+                .'<a href="'.esc_url(get_permalink($existing_id)).'">View timesheet</a>',
+                'Timesheet locked',
+                ['response' => 403]
+            );
         }
     }
 
@@ -999,15 +1001,21 @@ add_action('template_redirect', function(){
     $post_id = intval($_GET['post_id']);
     if (!$post_id) return;
 
-    // Security: require nonce if user is logged in, otherwise allow public if post is public
-    if ( is_user_logged_in() ) {
-        if (!isset($_GET['_wpnonce']) || !wp_verify_nonce($_GET['_wpnonce'], 'tt_pdf_'.$post_id)) {
-            wp_die(__('Invalid PDF request.', 'oac'));
-        }
+    // Security: timesheets contain employee PII, so always require login + nonce,
+    // and only let the employee, their assigned manager, or editors/admins download.
+    if ( !is_user_logged_in() ) {
+        auth_redirect(); // redirects to login and exits
+    }
+    if (!isset($_GET['_wpnonce']) || !wp_verify_nonce($_GET['_wpnonce'], 'tt_pdf_'.$post_id)) {
+        wp_die(__('Invalid PDF request.', 'oac'), '', ['response' => 403]);
     }
 
     $post = get_post($post_id);
     if (!$post || $post->post_type !== 'timesheet') return;
+
+    if (!tt_user_can_view_timesheet($post_id)) {
+        wp_die(__('You are not allowed to download this timesheet.', 'oac'), '', ['response' => 403]);
+    }
 
     // Build HTML using the same data the frontend uses
     $tt_data   = get_post_meta($post_id, 'tt_data', true);
@@ -1113,6 +1121,21 @@ add_action('template_redirect', function(){
 
 
 
+/**
+ * Can this user view a timesheet? True for the employee it belongs to, and for anyone
+ * who can edit it: admins/editors, plus a tt_manager for their assigned employees
+ * (granted via tt_manager_timesheet_caps).
+ */
+function tt_user_can_view_timesheet($timesheet_id, $user_id = null) {
+    if (!$user_id) $user_id = get_current_user_id();
+    if (!$user_id) return false;
+    $post = get_post($timesheet_id);
+    if (!$post || $post->post_type !== 'timesheet') return false;
+    $emp_uid = intval(get_post_meta($post->ID, 'employee_user_id', true));
+    if ($user_id === intval($post->post_author) || ($emp_uid && $user_id === $emp_uid)) return true;
+    return user_can($user_id, 'edit_post', $post->ID);
+}
+
 // Require login for pages that render the time tracker form (shortcode) and for Timesheet views.
 add_action('template_redirect', 'tt_require_login_for_timesheet_pages');
 function tt_require_login_for_timesheet_pages(){
@@ -1123,6 +1146,10 @@ function tt_require_login_for_timesheet_pages(){
         if (!is_user_logged_in()) {
             wp_redirect(wp_login_url(home_url(add_query_arg([], $GLOBALS['wp']->request))));
             exit;
+        }
+        // Logged in isn't enough: only the employee, their manager, or editors/admins may view.
+        if (is_singular('timesheet') && !tt_user_can_view_timesheet(get_queried_object_id())) {
+            wp_die('You do not have permission to view this timesheet.', 'Not allowed', ['response' => 403]);
         }
         return;
     }
@@ -1151,6 +1178,25 @@ function tt_require_login_for_timesheet_pages(){
         exit;
     }
 }
+
+// The /timesheets/ archive (and its feed) would otherwise list every employee's sheets
+// to any logged-in user. Limit non-editors to their own; managers use the Manager Dashboard.
+add_action('pre_get_posts', 'tt_limit_timesheet_archive');
+function tt_limit_timesheet_archive($query){
+    if (is_admin() || !$query->is_main_query() || !$query->is_post_type_archive('timesheet')) return;
+    if (current_user_can('edit_others_posts')) return;
+    // Logged-out users are redirected by tt_require_login_for_timesheet_pages; author__in [0] matches nothing meanwhile.
+    $query->set('author__in', [get_current_user_id()]);
+}
+
+// Keep timesheet URLs/titles (which contain employee names) out of public discovery endpoints.
+add_filter('wp_sitemaps_post_types', function($post_types){
+    unset($post_types['timesheet']);
+    return $post_types;
+});
+add_filter('oembed_response_data', function($data, $post){
+    return ($post && $post->post_type === 'timesheet') ? false : $data;
+}, 10, 2);
 
 
 
