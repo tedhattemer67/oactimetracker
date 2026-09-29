@@ -51,7 +51,8 @@ add_action('init','tt_register_timesheet_cpt');
 // Enqueue scripts and styles
 add_action('wp_enqueue_scripts','oac_time_tracker_enqueue_assets');
 function oac_time_tracker_enqueue_assets(){
-    wp_enqueue_style('oac-time-tracker-css', plugin_dir_url(__FILE__).'css/time-tracker.css');
+    $tt_css = plugin_dir_path(__FILE__) . 'css/time-tracker.css';
+    wp_enqueue_style('oac-time-tracker-css', plugin_dir_url(__FILE__).'css/time-tracker.css', [], file_exists($tt_css) ? filemtime($tt_css) : null);
     wp_enqueue_style('oac-time-tracker-print', plugin_dir_url(__FILE__).'css/print.css', [], null, 'print');
     $tt_js = plugin_dir_path(__FILE__) . 'js/tt-time-tracker.js';
     wp_enqueue_script('tt-time-tracker', plugin_dir_url(__FILE__).'js/tt-time-tracker.js', ['jquery'], file_exists($tt_js) ? filemtime($tt_js) : '1.1.1', true);
@@ -1185,7 +1186,8 @@ function tt_render_nav_bar($active = 'entry'){
     ];
 
     ob_start();
-    echo '<nav class="tt-nav" aria-label="Time Tracker navigation">';
+    // data-html2canvas-ignore keeps the nav out of the browser-generated PDF.
+    echo '<nav class="tt-nav" aria-label="Time Tracker navigation" data-html2canvas-ignore="true">';
     $first = true;
     foreach($links as $key => $link){
         if(!$link['show']) continue;
@@ -1199,6 +1201,10 @@ function tt_render_nav_bar($active = 'entry'){
             echo '<a class="'.esc_attr($class).'" href="'.esc_url($link['url']).'">'.esc_html($link['label']).'</a>';
         }
     }
+    // Log out lives here so it's on every plugin page (managers have no WP toolbar).
+    $me = wp_get_current_user();
+    echo '<span class="tt-nav-user">'.esc_html($me->display_name)
+        .' <a class="tt-nav-logout" href="'.esc_url(wp_logout_url(home_url('/'))).'">Log out</a></span>';
     echo '</nav>';
     return ob_get_clean();
 }
@@ -1307,6 +1313,7 @@ function tt_my_timesheets_shortcode($atts = []){
     ]);
 
     ob_start();
+    echo tt_render_nav_bar('mine');
     echo '<h3>My Timesheets</h3>';
     if(!$q->have_posts()){
         echo '<p>No timesheets yet.</p>';
@@ -1628,7 +1635,7 @@ function tt_render_timesheet_content_from_meta($content){
 
     $sig_html = function_exists('tt_build_signature_block') ? tt_build_signature_block( get_the_ID() ) : '';
 
-    return $actions_html . $title . $table_html . $sig_html;
+    return tt_render_nav_bar('') . $actions_html . $title . $table_html . $sig_html;
 }
 
 
