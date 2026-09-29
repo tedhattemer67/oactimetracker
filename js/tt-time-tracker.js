@@ -47,14 +47,50 @@
       return new Date(y,m-1,d);
     }
 
+    // Hours for one In/Out pair. There are no overnight shifts, so an Out at or before its
+    // In is flagged (setCustomValidity blocks Save Draft / Submit) and counts as 0.
+    function ttShiftHours($in, $out){
+      const a = $in.val(), b = $out.val();
+      let hrs = 0, bad = false;
+      if(a && b){
+        hrs = (new Date(`1970-01-01T${b}`) - new Date(`1970-01-01T${a}`)) / 3600000;
+        if(!(hrs > 0)){ bad = true; hrs = 0; }
+      }
+      const el = $out.get(0);
+      if(el && el.setCustomValidity) el.setCustomValidity(bad ? 'Time Out must be later than Time In (no overnight shifts).' : '');
+      $in.css('outline', ''); // also clears any "missing time" flag from the Submit check
+      $out.css('outline', bad ? '2px solid #d63638' : '');
+      return hrs;
+    }
+
+    // On Submit (not Save Draft), every started shift needs both a Time In and a Time Out.
+    $(document).on('click', '#tt-submit-btn', function(e){
+      let firstBad = null;
+      $('#time-grid .time-body tr').each(function(){
+        for(const n of [1,2]){
+          const $i = $(this).find('.in'+n), $o = $(this).find('.out'+n);
+          if(!!$i.val() !== !!$o.val()){
+            const $empty = $i.val() ? $o : $i;
+            $empty.css('outline', '2px solid #d63638');
+            if(!firstBad) firstBad = $empty;
+          }
+        }
+      });
+      if(firstBad){
+        e.preventDefault();
+        ttSetStatus('Each shift needs both a Time In and a Time Out before you submit (highlighted in red).');
+        firstBad.get(0).focus();
+      }
+    });
+
     function recalcAll(){
       let sums={hrs:0,vac:0,sick:0,pers:0,hol:0,unp:0,ot:0,all:0};
       $('#time-grid .time-body tr').each(function(i){
         let in1=$(this).find('.in1').val(), out1=$(this).find('.out1').val();
         let in2=$(this).find('.in2').val(), out2=$(this).find('.out2').val();
         let total=0;
-        if(in1&&out1) total+= (new Date(`1970-01-01T${out1}`)-new Date(`1970-01-01T${in1}`))/3600000;
-        if(in2&&out2) total+= (new Date(`1970-01-01T${out2}`)-new Date(`1970-01-01T${in2}`))/3600000;
+        total += ttShiftHours($(this).find('.in1'), $(this).find('.out1'));
+        total += ttShiftHours($(this).find('.in2'), $(this).find('.out2'));
         $(this).find('.hours-total').text(total.toFixed(2));
         let ptoRow = $('#pto-grid .pto-body tr').eq(i);
         ptoRow.find('.pto-reg').text(total.toFixed(2));

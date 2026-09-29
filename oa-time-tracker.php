@@ -244,6 +244,25 @@ function ttc_handle_submission(){
     if(!$start_raw) wp_die('Please choose a valid pay period.');
     $start = DateTime::createFromFormat('Y-m-d', $start_raw);
     $end = clone $start; $end->modify('+13 days');
+
+    // Reject impossible times before touching anything (the JS catches these first; this
+    // is the backstop). Drafts may have a half-filled pair; a submission may not.
+    $time_rows = [];
+    for($i=0;$i<14;$i++){
+        $time_rows[$i] = [
+            'date' => (clone $start)->modify("+$i days")->format('Y-m-d'),
+            'in1'  => sanitize_text_field($_POST["time_in_1_$i"] ?? ''),
+            'out1' => sanitize_text_field($_POST["time_out_1_$i"] ?? ''),
+            'in2'  => sanitize_text_field($_POST["time_in_2_$i"] ?? ''),
+            'out2' => sanitize_text_field($_POST["time_out_2_$i"] ?? ''),
+        ];
+    }
+    $time_errors = tt_validate_time_pairs($time_rows, $tt_action !== 'draft');
+    if($time_errors){
+        wp_die('<p>Please fix these times and try again (use your browser\'s Back button to return to the form):</p><ul><li>'
+            .implode('</li><li>', array_map('esc_html', $time_errors)).'</li></ul>', 'Invalid times', ['response' => 400]);
+    }
+
     // Determine whose timesheet this is. Admins and managers may pick an employee in
     // the dropdown (sent as employee_user_id_override); managers only for their own
     // assigned employees. Everyone else always files for themselves.
@@ -379,7 +398,10 @@ function ttc_handle_submission(){
 }
 
 
+// Browser-side "download PDF" button — only needed on single timesheet pages.
 function myplugin_enqueue_pdf_scripts() {
+  if ( ! is_singular('timesheet') ) return;
+
   // 1. html2pdf bundle
   wp_enqueue_script(
     'html2pdf',
@@ -389,26 +411,21 @@ function myplugin_enqueue_pdf_scripts() {
     true
   );
 
-  // 2. your custom JS
-wp_enqueue_script(
-  'myplugin-pdf-print',
-  plugin_dir_url(__FILE__) . 'js/pdf-print.js',
-  ['html2pdf','jquery'],
-  time(), // ← forces fresh load every request
-  true
-);
+  // 2. Our PDF button handler; versioned by file time so it caches but updates on deploy.
+  $pdf_js = plugin_dir_path(__FILE__) . 'js/pdf-print.js';
+  wp_enqueue_script(
+    'myplugin-pdf-print',
+    plugin_dir_url(__FILE__) . 'js/pdf-print.js',
+    ['html2pdf','jquery'],
+    file_exists($pdf_js) ? filemtime($pdf_js) : null,
+    true
+  );
 
-
-  // 3. only on single timesheet posts
-  if ( is_singular('timesheet') ) {
-    $title = get_the_title();
-    $slug  = sanitize_title( $title );
-    wp_localize_script(
-      'myplugin-pdf-print',
-      'MyPluginPDF',
-      [ 'filename' => $slug . '.pdf' ]
-    );
-  }
+  wp_localize_script(
+    'myplugin-pdf-print',
+    'MyPluginPDF',
+    [ 'filename' => sanitize_title( get_the_title() ) . '.pdf' ]
+  );
 }
 add_action( 'wp_enqueue_scripts', 'myplugin_enqueue_pdf_scripts' );
 
@@ -581,6 +598,11 @@ add_action('save_post_timesheet', function ($post_id) {
 
     $data_in = isset($_POST['tt_data']) ? wp_unslash($_POST['tt_data']) : [];
     $clean   = tt_sanitize_timesheet($data_in);
+    // No overnight shifts: if any Out isn't after its In, keep the saved hours unchanged.
+    if (tt_validate_time_pairs($clean['days'])) {
+        $GLOBALS['tt_save_notices'][] = 'invalid_times';
+        return;
+    }
     $old     = get_post_meta($post_id, 'tt_data', true);
     $old     = is_array($old) ? tt_sanitize_timesheet($old) : null;
 
@@ -670,6 +692,9 @@ add_action('admin_notices', function () {
     $codes = explode(',', sanitize_text_field(wp_unslash($_GET['tt_notice'])));
     if (in_array('reopened', $codes, true)) {
         echo '<div class="notice notice-warning is-dismissible"><p>The hours changed on a submitted/approved timesheet, so it was sent back to the employee as <strong>Needs Changes</strong> and both signatures were cleared. They need to review and resubmit it, then the manager approves it again.</p></div>';
+    }
+    if (in_array('invalid_times', $codes, true)) {
+        echo '<div class="notice notice-error is-dismissible"><p>Your changes to the timesheet hours were <strong>not</strong> saved: every Time Out must be later than its Time In (overnight shifts aren\'t allowed). Re-enter the changes and update again.</p></div>';
     }
     if (in_array('period_conflict', $codes, true)) {
         echo '<div class="notice notice-error is-dismissible"><p>The period start was <strong>not</strong> changed: this employee already has a timesheet for that pay period. Edit that timesheet instead.</p></div>';
@@ -862,6 +887,35 @@ function tt_time_to_hours($t) {
     return $h + ($m/60.0);
 }
 
+/**
+ * Check each day's In/Out pairs. There are no overnight shifts, so Out must be after In.
+ * With $require_complete, a pair with only one of In/Out filled is also an error.
+ * Returns human-readable error strings (empty if all good).
+ */
+function tt_validate_time_pairs($days, $require_complete = false) {
+    $errors = [];
+    foreach ((array)$days as $i => $d) {
+        $label = !empty($d['date']) ? date('D n/j', strtotime($d['date'])) : 'Day '.($i + 1);
+        foreach ([1, 2] as $n) {
+            $in  = $d["in$n"]  ?? '';
+            $out = $d["out$n"] ?? '';
+            if ($in === '' && $out === '') continue;
+            if ($in === '' || $out === '') {
+                if ($require_complete) $errors[] = "$label, shift $n: enter both a Time In and a Time Out.";
+                continue;
+            }
+            $a = tt_time_to_hours($in);
+            $b = tt_time_to_hours($out);
+            if ($a === null || $b === null) {
+                $errors[] = "$label, shift $n: invalid time.";
+            } elseif ($b <= $a) {
+                $errors[] = "$label, shift $n: Time Out ($out) must be later than Time In ($in).";
+            }
+        }
+    }
+    return $errors;
+}
+
 function tt_span_hours($in, $out) {
     $a = tt_time_to_hours($in);
     $b = tt_time_to_hours($out);
@@ -984,7 +1038,7 @@ function tt_seed_data_if_missing($post_id){
 add_action('admin_enqueue_scripts', function ($hook) {
     global $post_type;
     if ($post_type !== 'timesheet') return;
-    wp_enqueue_script('tt-admin-editor', plugins_url('assets/admin-timesheet.js', __FILE__), ['jquery'], '1.0', true);
+    wp_enqueue_script('tt-admin-editor', plugins_url('assets/admin-timesheet.js', __FILE__), ['jquery'], filemtime(plugin_dir_path(__FILE__) . 'assets/admin-timesheet.js'), true);
     wp_enqueue_style('tt-admin-editor-css', plugins_url('assets/admin-timesheet.css', __FILE__), [], '1.0');
 });
 

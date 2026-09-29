@@ -16,10 +16,22 @@
   }
   function num(v){ v=parseFloat(v); return isNaN(v)?0: v; }
 
+  // No overnight shifts: flag an Out that isn't after its In. setCustomValidity also
+  // stops the Update button from submitting until it's fixed.
+  function markPair($in, $out){
+    var a = parseTime($in.val()), b = parseTime($out.val());
+    var bad = (a != null && b != null && b <= a);
+    var el = $out.get(0);
+    if(el && el.setCustomValidity) el.setCustomValidity(bad ? 'Time Out must be later than Time In (no overnight shifts).' : '');
+    $out.css('outline', bad ? '2px solid #d63638' : '');
+  }
+
   function recalc(){
     var reg=0,vac=0,sick=0,pers=0,hol=0,unp=0,ot=0,grand=0;
     $('#tt-admin-grid tbody tr.tt-row').each(function(){
       var $tr = $(this);
+      markPair($tr.find('.tt-in1'), $tr.find('.tt-out1'));
+      markPair($tr.find('.tt-in2'), $tr.find('.tt-out2'));
       var h = spanHours($tr.find('.tt-in1').val(), $tr.find('.tt-out1').val()) +
               spanHours($tr.find('.tt-in2').val(), $tr.find('.tt-out2').val());
       var v = num($tr.find('.tt-vac').val());
