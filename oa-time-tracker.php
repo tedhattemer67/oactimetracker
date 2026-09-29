@@ -240,26 +240,8 @@ function ttc_handle_submission(){
         wp_die('Security check failed.');
     }
     $tt_action = sanitize_text_field($_POST['tt_action'] ?? 'submit');
-    $start_raw = sanitize_text_field($_POST['pay_period']);
-
-    // Normalize pay period to ISO Y-m-d (handles m/d/Y etc)
-    $start_ts = strtotime($start_raw);
-    if($start_ts){ $start_raw = date('Y-m-d', $start_ts); }
-    // Normalize pay_period to Sunday (guardrail against Saturday regression)
-    if($start_raw){
-        $dt_guard = DateTime::createFromFormat('Y-m-d', $start_raw);
-        if($dt_guard){
-            $dow = intval($dt_guard->format('w')); // 0=Sun,6=Sat
-            if($dow !== 0){
-                if($dow === 6){
-                    $dt_guard->modify('+1 day');
-                } else {
-                    $dt_guard->modify('last sunday');
-                }
-                $start_raw = $dt_guard->format('Y-m-d');
-            }
-        }
-    }
+    $start_raw = tt_normalize_period_start(sanitize_text_field($_POST['pay_period'] ?? ''));
+    if(!$start_raw) wp_die('Please choose a valid pay period.');
     $start = DateTime::createFromFormat('Y-m-d', $start_raw);
     $end = clone $start; $end->modify('+13 days');
     // Determine whose timesheet this is. Admins and managers may pick an employee in
@@ -514,7 +496,7 @@ function tt_render_timesheet_metabox(\WP_Post $post) {
         $row = $days[$i] ?? [];
         $v = function($k) use ($row){ return esc_attr($row[$k] ?? ''); };
         echo '<tr class="tt-row">';
-        echo '<td><input class="tt-date" type="date" name="tt_data[days]['.$i.'][date]" value="'.$v('date').'" /></td>';
+        echo '<td><input class="tt-date" type="date" name="tt_data[days]['.$i.'][date]" value="'.$v('date').'" readonly title="'.esc_attr__('Dates follow the Period Start','oac').'" /></td>';
         echo '<td><input class="tt-in1"  type="time" name="tt_data[days]['.$i.'][in1]"  value="'.$v('in1').'"  /></td>';
         echo '<td><input class="tt-out1" type="time" name="tt_data[days]['.$i.'][out1]" value="'.$v('out1').'" /></td>';
         echo '<td><input class="tt-in2"  type="time" name="tt_data[days]['.$i.'][in2]"  value="'.$v('in2').'"  /></td>';
@@ -532,8 +514,8 @@ function tt_render_timesheet_metabox(\WP_Post $post) {
 
     // Ancillary fields
     echo '<div class="tt-flex">';
-    echo '<p><label>'.esc_html__('Period Start','oac').' <input type="date" name="tt_data[period_start]" value="' . esc_attr($data['period_start'] ?? '') . '"></label></p>';
-    echo '<p><label>'.esc_html__('Employee','oac').' <input type="text" name="tt_data[employee]" value="' . esc_attr($data['employee'] ?? '') . '"></label></p>';
+    echo '<p><label>'.esc_html__('Period Start','oac').' <input type="date" name="tt_data[period_start]" value="' . esc_attr($data['period_start'] ?? '') . '"></label><br><span class="description">'.esc_html__('Moved to the Sunday that starts the pay period; day dates follow it.','oac').'</span></p>';
+    echo '<p><label>'.esc_html__('Employee','oac').' <input type="text" value="' . esc_attr($data['employee'] ?? '') . '" readonly></label></p>';
     echo '<p><label>'.esc_html__('Supervisor','oac').' <input type="text" name="tt_data[supervisor]" value="' . esc_attr($data['supervisor'] ?? '') . '"></label></p>';
     echo '</div>';
 
@@ -576,6 +558,14 @@ function tt_render_timesheet_metabox(\WP_Post $post) {
     echo '</tbody></table>';
     echo '<p class="description" style="margin-top:6px;">' . esc_html__( 'Signatures are recorded automatically when an employee submits or a manager approves. They clear if the timesheet is sent back for changes.', 'oac' ) . '</p>';
 
+    // Editing hours on a submitted/approved sheet sends it back to the employee (see save handler).
+    $state = get_post_meta( $post->ID, 'tt_state', true );
+    echo '<h4>' . esc_html__( 'Note to employee', 'oac' ) . '</h4>';
+    if ( in_array( $state, ['submitted', 'approved'], true ) ) {
+        echo '<p class="description" style="color:#b32d2e;">' . esc_html__( 'This timesheet is signed. If you change the hours or period and save, it goes back to the employee as Needs Changes, both signatures are cleared, and the employee must resubmit.', 'oac' ) . '</p>';
+    }
+    echo '<textarea name="tt_admin_changes_note" rows="2" style="width:100%;" placeholder="' . esc_attr__( 'Optional: explain what you changed. Shown to the employee when the sheet is sent back.', 'oac' ) . '"></textarea>';
+
     echo '</div>'; // end metabox
 }
 
@@ -589,23 +579,100 @@ add_action('save_post_timesheet', function ($post_id) {
     if (!current_user_can('edit_post', $post_id)) return;
     if (!isset($_POST['tt_nonce']) || !wp_verify_nonce($_POST['tt_nonce'], 'tt_save_timesheet')) return;
 
-    $data_in = isset($_POST['tt_data']) ? $_POST['tt_data'] : [];
+    $data_in = isset($_POST['tt_data']) ? wp_unslash($_POST['tt_data']) : [];
     $clean   = tt_sanitize_timesheet($data_in);
-    $totals  = tt_calculate_totals($clean);
+    $old     = get_post_meta($post_id, 'tt_data', true);
+    $old     = is_array($old) ? tt_sanitize_timesheet($old) : null;
 
+    // Employee is whoever owns the sheet, not free text.
+    $owner      = intval(get_post_meta($post_id, 'employee_user_id', true)) ?: intval(get_post_field('post_author', $post_id));
+    $owner_user = $owner ? get_userdata($owner) : null;
+    if ($owner_user) {
+        $clean['employee'] = $owner_user->display_name;
+    } elseif ($old) {
+        $clean['employee'] = $old['employee'];
+    }
+
+    // Period start: normalize to a Sunday, and refuse a move onto a period this
+    // employee already has a sheet for (that would create a duplicate).
+    $old_start = get_post_meta($post_id, 'tt_period_start', true) ?: ($old['period_start'] ?? '');
+    $new_start = tt_normalize_period_start($clean['period_start']) ?: $old_start;
+    if ($new_start !== $old_start && $owner && tt_find_timesheet_for($owner, $new_start)) {
+        $new_start = $old_start;
+        $GLOBALS['tt_save_notices'][] = 'period_conflict';
+    }
+    $clean['period_start'] = $new_start;
+    // Day dates always follow the period start (as on the front-end form).
+    if ($new_start) {
+        $d = new DateTime($new_start);
+        for ($i = 0; $i < 14; $i++) {
+            $clean['days'][$i]['date'] = $d->format('Y-m-d');
+            $d->modify('+1 day');
+        }
+    }
+
+    // Did anything the employee certified (period or hours) change? Day dates are left out
+    // since they're derived from the period (older sheets may have stored them differently).
+    $hours_only = function ($days) {
+        return array_map(function ($row) { unset($row['date']); return $row; }, $days);
+    };
+    $changed = !$old || $new_start !== $old_start || $hours_only($old['days']) != $hours_only($clean['days']);
+
+    $totals = tt_calculate_totals($clean);
     update_post_meta($post_id, 'tt_data',   $clean);
     update_post_meta($post_id, 'tt_totals', $totals);
+    update_post_meta($post_id, 'tt_employee_name', $clean['employee']);
+    if ($new_start) update_post_meta($post_id, 'tt_period_start', $new_start);
+
+    // Edits to a submitted/approved sheet invalidate both signatures: send it back so the
+    // employee reviews and re-certifies (same rule as a manager's Request Changes).
+    $state = get_post_meta($post_id, 'tt_state', true);
+    $admin_note = sanitize_textarea_field(wp_unslash($_POST['tt_admin_changes_note'] ?? ''));
+    if ($changed && in_array($state, ['submitted', 'approved'], true)) {
+        update_post_meta($post_id, 'tt_state', 'needs_changes');
+        foreach (['tt_employee_signed','tt_employee_signed_at','tt_employee_signed_by','tt_manager_signed','tt_manager_signed_at','tt_manager_signed_by'] as $k) {
+            delete_post_meta($post_id, $k);
+        }
+        $state = 'needs_changes';
+        if ($admin_note === '') $admin_note = 'Your timesheet was edited by an administrator. Please review the changes and resubmit.';
+        $GLOBALS['tt_save_notices'][] = 'reopened';
+    }
+    if ($state === 'needs_changes' && $admin_note !== '') {
+        update_post_meta($post_id, 'tt_changes_note', $admin_note);
+        update_post_meta($post_id, 'tt_changes_requested_by', get_current_user_id());
+        update_post_meta($post_id, 'tt_changes_requested_at', current_time('mysql', true)); // UTC
+    }
 
     // Keep the front-end view + PDF source in sync with admin edits by regenerating
-    // the canonical HTML table in post_content from tt_data + calculated totals.
+    // the canonical HTML table in post_content from tt_data + calculated totals, and
+    // the title (end date + employee) in case the period moved.
+    $update = ['ID' => $post_id];
     $html = tt_build_timesheet_html($clean, $totals);
-    if ($html) {
+    if ($html) $update['post_content'] = $html;
+    if ($new_start) {
+        $end = (new DateTime($new_start))->modify('+13 days');
+        $update['post_title'] = $end->format('n-j-Y') . '-' . strtoupper(str_replace(' ', '-', $clean['employee'] ?: 'EMPLOYEE'));
+    }
+    if (count($update) > 1) {
         $ttc_in_progress = true;
-        wp_update_post([
-            'ID'           => $post_id,
-            'post_content' => $html,
-        ]);
+        wp_update_post($update);
         $ttc_in_progress = false;
+    }
+});
+
+// Tell the editor what the save did (reopened for the employee / period change refused).
+add_filter('redirect_post_location', function ($location) {
+    if (empty($GLOBALS['tt_save_notices'])) return $location;
+    return add_query_arg('tt_notice', implode(',', array_unique($GLOBALS['tt_save_notices'])), $location);
+});
+add_action('admin_notices', function () {
+    if (empty($_GET['tt_notice']) || get_post_type(intval($_GET['post'] ?? 0)) !== 'timesheet') return;
+    $codes = explode(',', sanitize_text_field(wp_unslash($_GET['tt_notice'])));
+    if (in_array('reopened', $codes, true)) {
+        echo '<div class="notice notice-warning is-dismissible"><p>The hours changed on a submitted/approved timesheet, so it was sent back to the employee as <strong>Needs Changes</strong> and both signatures were cleared. They need to review and resubmit it, then the manager approves it again.</p></div>';
+    }
+    if (in_array('period_conflict', $codes, true)) {
+        echo '<div class="notice notice-error is-dismissible"><p>The period start was <strong>not</strong> changed: this employee already has a timesheet for that pay period. Edit that timesheet instead.</p></div>';
     }
 });
 
@@ -741,6 +808,23 @@ function tt_build_timesheet_html($clean, $totals) {
            . '</tr></tfoot></table>';
 
     return $html;
+}
+
+/**
+ * Normalize a pay-period start to ISO Y-m-d on a Sunday (handles m/d/Y etc.; a Saturday
+ * moves forward a day, any other weekday back to the previous Sunday). '' if unparseable.
+ */
+function tt_normalize_period_start($raw) {
+    $ts = strtotime((string)$raw);
+    if (!$ts) return '';
+    $dt = new DateTime(date('Y-m-d', $ts));
+    $dow = intval($dt->format('w')); // 0=Sun, 6=Sat
+    if ($dow === 6) {
+        $dt->modify('+1 day');
+    } elseif ($dow !== 0) {
+        $dt->modify('last sunday');
+    }
+    return $dt->format('Y-m-d');
 }
 
 // Helpers: sanitize + time math + totals
