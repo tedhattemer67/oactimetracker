@@ -148,6 +148,22 @@
     function ttSetStatus(msg){
       const el = document.getElementById('tt-draft-status');
       if(el) el.textContent = msg || '';
+      ttSetChangesNote('');
+    }
+
+    // Manager's "Request Changes" note, shown in its own box. Kept out of #tt-draft-status
+    // because the certify block keys off that element's text.
+    function ttSetChangesNote(note){
+      let box = document.getElementById('tt-changes-note');
+      if(!note){ if(box) box.remove(); return; }
+      if(!box){
+        box = document.createElement('div');
+        box.id = 'tt-changes-note';
+        box.style.cssText = 'margin:10px 0;padding:10px;border-left:4px solid #d63638;background:#fff;white-space:pre-wrap;';
+        const table = document.querySelector('#tt-container .tt-table-wrapper');
+        if(table) table.parentNode.insertBefore(box, table); else return;
+      }
+      box.textContent = 'Your manager requested changes: ' + note;
     }
 
     
@@ -286,6 +302,7 @@
           const locked = (state === 'submitted' || state === 'approved');
           ttSetLocked(locked);
           ttSetStatus(locked ? ('Status: '+state) : ('Status: '+state+' (editable)'));
+          ttSetChangesNote(res.data.changes_note || '');
         })
         .catch(()=>{});
     }

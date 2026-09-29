@@ -1072,9 +1072,8 @@ add_action('template_redirect', function(){
 
 
 /**
- * Can this user view a timesheet? True for the employee it belongs to, and for anyone
- * who can edit it: admins/editors, plus a tt_manager for their assigned employees
- * (granted via tt_manager_timesheet_caps).
+ * Can this user view a timesheet? True for the employee it belongs to, the employee's
+ * assigned manager (and admins), and anyone who can edit it (admins/editors).
  */
 function tt_user_can_view_timesheet($timesheet_id, $user_id = null) {
     if (!$user_id) $user_id = get_current_user_id();
@@ -1083,6 +1082,7 @@ function tt_user_can_view_timesheet($timesheet_id, $user_id = null) {
     if (!$post || $post->post_type !== 'timesheet') return false;
     $emp_uid = intval(get_post_meta($post->ID, 'employee_user_id', true));
     if ($user_id === intval($post->post_author) || ($emp_uid && $user_id === $emp_uid)) return true;
+    if (tt_user_can_manage_timesheet($post->ID, $user_id)) return true;
     return user_can($user_id, 'edit_post', $post->ID);
 }
 
@@ -1172,8 +1172,9 @@ function tt_render_nav_bar($active = 'entry'){
     if(!$mine_url){
         $mine_url = home_url('/my-timesheets/');
     }
-    $entry_url   = get_permalink() ?: home_url('/');
-    $manager_url = admin_url('edit.php?post_type=timesheet&page=tt-manager-inbox');
+    // The entry form is usually the front page; only trust get_permalink() when we're on it.
+    $entry_url   = ($active === 'entry' && get_permalink()) ? get_permalink() : home_url('/');
+    $manager_url = tt_manager_dashboard_url();
 
     $is_manager = function_exists('tt_user_is_manager') ? tt_user_is_manager() : false;
 
@@ -1225,6 +1226,11 @@ function tt_register_settings(){
         'sanitize_callback' => 'esc_url_raw',
         'default'           => '',
     ]);
+    register_setting('tt_settings_group', 'tt_manager_dashboard_url', [
+        'type'              => 'string',
+        'sanitize_callback' => 'esc_url_raw',
+        'default'           => '',
+    ]);
 }
 
 function tt_render_settings_page(){
@@ -1247,6 +1253,21 @@ function tt_render_settings_page(){
                         <p class="description">
                             Full URL of the page where you placed the <code>[my_timesheets]</code> shortcode.
                             Used by the nav bar at the top of the Biweekly Entry page.
+                        </p>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="tt_manager_dashboard_url">Manager Dashboard page URL</label></th>
+                    <td>
+                        <input type="url"
+                               id="tt_manager_dashboard_url"
+                               name="tt_manager_dashboard_url"
+                               class="regular-text"
+                               value="<?php echo esc_attr(get_option('tt_manager_dashboard_url', '')); ?>"
+                               placeholder="<?php echo esc_attr(home_url('/manager-dashboard/')); ?>">
+                        <p class="description">
+                            Full URL of the page where you placed the <code>[tt_manager_dashboard]</code> shortcode.
+                            Timesheet Managers are sent here after login and whenever they try to open wp-admin.
                         </p>
                     </td>
                 </tr>
@@ -1382,6 +1403,8 @@ function tt_ajax_get_my_timesheet(){
         'timesheet_id' => $id,
         'state' => $state,
         'data' => $data,
+        // Manager's note explaining what to fix, while the sheet is sent back.
+        'changes_note' => ($state === 'needs_changes') ? (string)get_post_meta($id,'tt_changes_note',true) : '',
     ]);
 }
 
@@ -1558,10 +1581,6 @@ function tt_render_timesheet_content_from_meta($content){
     $emp_uid = intval(get_post_meta($post->ID,'employee_user_id',true));
     $is_employee_owner = ($uid && ($uid===intval($post->post_author) || ($emp_uid && $uid===$emp_uid)));
 
-    // Manager mapping lives on employee user: tt_manager_user_id
-    $manager_id = $emp_uid ? intval(get_user_meta($emp_uid,'tt_manager_user_id',true)) : 0;
-    $is_manager_for_employee = ($uid && $manager_id && $uid===$manager_id);
-
     $actions_html = '<div class="tt-actions" style="margin:12px 0;padding:10px;border:1px solid #ddd;border-radius:8px;background:#fafafa;">';
     $actions_html .= '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">';
     $actions_html .= '<strong>Status:</strong> <span class="tt-status-badge" style="padding:2px 8px;border-radius:999px;border:1px solid #ccc;background:#fff;">'.esc_html(ucwords(str_replace('_',' ',$state))).'</span>';
@@ -1572,15 +1591,33 @@ function tt_render_timesheet_content_from_meta($content){
         $actions_html .= ' <a class="button" href="'.esc_url($withdraw_url).'" onclick="return confirm(\'Withdraw submission and return to Draft?\');">Withdraw Submission</a>';
     }
 
-    // Manager/Admin: Approve / Request Changes (only when submitted or needs_changes)
-    if( (current_user_can('manage_options') || current_user_can('edit_others_posts') || $is_manager_for_employee) && in_array($state, ['submitted','needs_changes'], true) ){
-        $approve_url = wp_nonce_url(admin_url('admin-post.php?action=tt_manager_action&do=approve&timesheet_id='.$post->ID), 'tt_manager_action_'.$post->ID);
-        $changes_url = wp_nonce_url(admin_url('admin-post.php?action=tt_manager_action&do=request_changes&timesheet_id='.$post->ID), 'tt_manager_action_'.$post->ID);
+    // Assigned manager/Admin: Approve / Request Changes (only while submitted — matches tt_manager_action_handler)
+    $changes_form = '';
+    if( tt_user_can_manage_timesheet($post->ID) && $state === 'submitted' ){
+        $approve_url = wp_nonce_url(admin_url('admin-post.php?action=tt_manager_action&do=approve&timesheet_id='.$post->ID), 'tt_manager_action_approve_'.$post->ID);
         $actions_html .= ' <a class="button button-primary" href="'.esc_url($approve_url).'" onclick="return confirm(\'Approve this timesheet?\');">Approve</a>';
-        $actions_html .= ' <a class="button" href="'.esc_url($changes_url).'" onclick="return confirm(\'Send back to employee for changes?\');">Request Changes</a>';
+        // Request Changes: the manager must say what to fix; the employee makes the corrections.
+        $changes_form = '<details id="tt-request-changes" style="margin-top:10px;"><summary class="button" style="display:inline-block;cursor:pointer;">Request Changes</summary>'
+            .'<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="margin-top:8px;">'
+            .'<input type="hidden" name="action" value="tt_manager_action">'
+            .'<input type="hidden" name="do" value="request_changes">'
+            .'<input type="hidden" name="timesheet_id" value="'.intval($post->ID).'">'
+            .wp_nonce_field('tt_manager_action_request_changes_'.$post->ID, '_wpnonce', true, false)
+            .'<label for="tt-changes-note" style="display:block;font-weight:600;">What needs to change?</label>'
+            .'<textarea id="tt-changes-note" name="tt_changes_note" rows="3" required style="width:100%;max-width:600px;"></textarea>'
+            .'<p><button type="submit" class="button">Send back to employee</button></p>'
+            .'</form></details>'
+            .'<script>if(location.hash==="#tt-request-changes"){var d=document.getElementById("tt-request-changes");if(d){d.open=true;d.scrollIntoView();}}</script>';
     }
 
-    $actions_html .= '</div></div>';
+    $actions_html .= '</div>' . $changes_form;
+
+    // Show the manager's note while the sheet is waiting on the employee's corrections.
+    if($state === 'needs_changes' && ($note = tt_changes_note_html($post->ID))){
+        $actions_html .= $note;
+    }
+
+    $actions_html .= '</div>';
 
     $title = '<h2 style="margin-top:0;">'.esc_html(get_the_title($post)).'</h2>';
     $table_html = function_exists('tt_build_timesheet_html') ? tt_build_timesheet_html($tt_data, $tt_totals) : '';
@@ -1651,19 +1688,20 @@ function tt_employee_withdraw_submission(){
 add_action('admin_post_tt_manager_action','tt_manager_action_handler');
 function tt_manager_action_handler(){
     if(!is_user_logged_in()) wp_die('Not logged in');
-    $tsid = intval($_GET['timesheet_id'] ?? 0);
-    $action = sanitize_text_field($_GET['do'] ?? '');
+    // Approve is a GET link; Request Changes is a POST form carrying the manager's note.
+    $tsid = intval($_REQUEST['timesheet_id'] ?? 0);
+    $action = sanitize_text_field($_REQUEST['do'] ?? '');
     if(!$tsid || !$action) wp_die('Missing data');
-    $_nonce = $_GET['_wpnonce'] ?? '';
+    $_nonce = $_REQUEST['_wpnonce'] ?? '';
     $nonce_ok = wp_verify_nonce($_nonce, 'tt_manager_action_'.$action.'_'.$tsid) || wp_verify_nonce($_nonce, 'tt_manager_action_'.$tsid);
     if(!$nonce_ok) wp_die('Security check failed');
     $p = get_post($tsid);
     if(!$p || $p->post_type!=='timesheet') wp_die('Not found');
-    $emp_uid = intval(get_post_meta($tsid,'employee_user_id',true));
-    $manager_id = intval(get_user_meta($emp_uid,'tt_manager_user_id',true));
     $uid = get_current_user_id();
-    $can_override = current_user_can('manage_options');
-    if(!$can_override && $manager_id !== $uid) wp_die('Not allowed');
+    if(!tt_user_can_manage_timesheet($tsid)) wp_die('Not allowed');
+    // Only a submitted sheet can be approved or sent back (a draft or needs_changes sheet
+    // has no current employee signature).
+    if(get_post_meta($tsid,'tt_state',true) !== 'submitted') wp_die('Only submitted timesheets can be approved or sent back.');
 
     if($action === 'approve'){
         update_post_meta($tsid,'tt_state','approved');
@@ -1672,7 +1710,14 @@ function tt_manager_action_handler(){
         update_post_meta($tsid, 'tt_manager_signed_at', current_time('mysql', true)); // UTC
         update_post_meta($tsid, 'tt_manager_signed_by', $uid);
     } elseif($action === 'request_changes'){
+        $note = sanitize_textarea_field(wp_unslash($_POST['tt_changes_note'] ?? ''));
+        if($note === ''){
+            wp_die('Please say what needs to change. <a href="'.esc_url(get_permalink($tsid).'#tt-request-changes').'">Back to the timesheet</a>', 'Note required', ['response' => 400]);
+        }
         update_post_meta($tsid,'tt_state','needs_changes');
+        update_post_meta($tsid,'tt_changes_note', $note);
+        update_post_meta($tsid,'tt_changes_requested_by', $uid);
+        update_post_meta($tsid,'tt_changes_requested_at', current_time('mysql', true)); // UTC
         // Clear both signatures — employee must re-certify after making changes
         delete_post_meta($tsid, 'tt_employee_signed');
         delete_post_meta($tsid, 'tt_employee_signed_at');
@@ -1686,6 +1731,18 @@ function tt_manager_action_handler(){
 
     wp_safe_redirect(wp_get_referer() ?: get_permalink($tsid));
     exit;
+}
+
+/** The manager's latest "Request Changes" note as a notice box, or '' if none. */
+function tt_changes_note_html($tsid){
+    $note = get_post_meta($tsid, 'tt_changes_note', true);
+    if($note === '' || $note === false) return '';
+    $by = get_userdata(intval(get_post_meta($tsid, 'tt_changes_requested_by', true)));
+    $at = DateTime::createFromFormat('Y-m-d H:i:s', (string)get_post_meta($tsid, 'tt_changes_requested_at', true), new DateTimeZone('UTC'));
+    if($at) $at->setTimezone(new DateTimeZone('America/New_York'));
+    $who = 'Changes requested' . ($by ? ' by '.$by->display_name : '') . ($at ? ' on '.$at->format('M j, Y \a\t g:i A') : '');
+    return '<div class="tt-changes-note" style="margin-top:10px;padding:10px;border-left:4px solid #d63638;background:#fff;">'
+        .'<strong>'.esc_html($who).':</strong><br>'.nl2br(esc_html($note)).'</div>';
 }
 
 
@@ -1735,7 +1792,7 @@ function tt_manager_inbox_shortcode($atts=[]){
         if($start){ $dt=DateTime::createFromFormat('Y-m-d',$start); if($dt){ $dt->modify('+13 days'); $end=$dt->format('Y-m-d'); } }
         $state = get_post_meta($id,'tt_state',true);
         $approve_url = wp_nonce_url(admin_url('admin-post.php?action=tt_manager_action&do=approve&timesheet_id='.$id), 'tt_manager_action_approve_'.$id);
-        $chg_url = wp_nonce_url(admin_url('admin-post.php?action=tt_manager_action&do=request_changes&timesheet_id='.$id), 'tt_manager_action_request_changes_'.$id);
+        $chg_url = get_permalink($id).'#tt-request-changes'; // note form lives on the timesheet page
         echo '<tr>';
         echo '<td>'.esc_html($emp ? $emp->display_name : '—').'</td>';
         echo '<td>'.esc_html($start ? ($start.' – '.$end) : get_the_title()).'</td>';
@@ -1779,7 +1836,6 @@ function tt_add_manager_role() {
         // Custom caps used by this plugin
         'tt_view_team_timesheets'   => true,
         'tt_approve_timesheets'     => true,
-        'tt_edit_timesheets'        => true,
     ]);
 }
 
@@ -1881,45 +1937,38 @@ function tt_find_timesheet_for($target_uid, $period_start, $preferred_id = 0) {
     return $ids ? intval($ids[0]) : 0;
 }
 
-// Grant tt_manager role users access to admin dashboard (read-only by default in WP)
-add_filter('user_has_cap', 'tt_manager_admin_access', 10, 3);
-function tt_manager_admin_access($allcaps, $caps, $args) {
-    $user = wp_get_current_user();
-    if (!$user || !in_array('tt_manager', (array)$user->roles, true)) return $allcaps;
-    // Allow managers to log in to /wp-admin/ and read
-    $allcaps['read'] = true;
-    return $allcaps;
+/**
+ * Is this a front-end-only manager — the tt_manager role without any editing rights
+ * (i.e. not also an admin/editor)? These users are kept out of wp-admin entirely.
+ */
+function tt_is_frontend_only_manager($user_id = null) {
+    if (!$user_id) $user_id = get_current_user_id();
+    $user = $user_id ? get_userdata($user_id) : null;
+    return $user && in_array('tt_manager', (array)$user->roles, true) && !user_can($user_id, 'edit_posts');
 }
 
-// Redirect managers away from the main dashboard to the timesheet manager inbox
-add_action('admin_init', 'tt_manager_redirect_dashboard');
-function tt_manager_redirect_dashboard() {
-    $user = wp_get_current_user();
-    if (!$user || !in_array('tt_manager', (array)$user->roles, true)) return;
-    $screen = get_current_screen();
-    if ($screen && $screen->id === 'dashboard') {
-        wp_redirect(admin_url('edit.php?post_type=timesheet&page=tt-manager-inbox'));
-        exit;
-    }
+// Keep tt_managers out of wp-admin: everything they need is on the front-end Manager
+// Dashboard. admin-post.php (approve / request changes) and admin-ajax.php still work.
+add_action('admin_init', 'tt_manager_block_wp_admin');
+function tt_manager_block_wp_admin() {
+    global $pagenow;
+    if (wp_doing_ajax() || $pagenow === 'admin-post.php') return;
+    if (!tt_is_frontend_only_manager()) return;
+    wp_safe_redirect(tt_manager_dashboard_url());
+    exit;
 }
 
-// Hide irrelevant admin menu items for tt_manager role
-add_action('admin_menu', 'tt_manager_clean_admin_menu', 999);
-function tt_manager_clean_admin_menu() {
-    $user = wp_get_current_user();
-    if (!$user || !in_array('tt_manager', (array)$user->roles, true)) return;
-    // Remove everything except our pages
-    remove_menu_page('index.php');           // Dashboard
-    remove_menu_page('edit.php');            // Posts
-    remove_menu_page('upload.php');          // Media
-    remove_menu_page('edit.php?post_type=page'); // Pages
-    remove_menu_page('edit-comments.php');   // Comments
-    remove_menu_page('themes.php');          // Appearance
-    remove_menu_page('plugins.php');         // Plugins
-    remove_menu_page('users.php');           // Users
-    remove_menu_page('tools.php');           // Tools
-    remove_menu_page('options-general.php'); // Settings
-}
+// No WordPress toolbar for them on the front end either (it links into wp-admin).
+add_filter('show_admin_bar', function($show) {
+    return tt_is_frontend_only_manager() ? false : $show;
+});
+
+// After login, send them to the Manager Dashboard instead of wp-admin.
+add_filter('login_redirect', function($redirect_to, $requested, $user) {
+    if (!($user instanceof WP_User) || !tt_is_frontend_only_manager($user->ID)) return $redirect_to;
+    if (!$redirect_to || strpos($redirect_to, admin_url()) === 0) return tt_manager_dashboard_url();
+    return $redirect_to;
+}, 10, 3);
 
 
 // =============================================================================
@@ -1956,26 +2005,56 @@ function tt_expand_manager_query($query) {
 // Replace the old manager inbox admin page with a richer one
 remove_action('admin_menu', 'tt_add_manager_inbox_menu'); // remove old registration
 
-add_action('admin_menu', 'tt_add_manager_inbox_menu_v2');
-function tt_add_manager_inbox_menu_v2() {
-    // Determine capability: admins and tt_managers can access
-    $cap = 'read'; // tt_manager has 'read'; we check role manually inside the page
-    add_submenu_page(
-        'edit.php?post_type=timesheet',
-        'Manager Dashboard',
-        'Manager Dashboard',
-        $cap,
-        'tt-manager-inbox',
-        'tt_manager_dashboard_page'
-    );
+/** Front-end Manager Dashboard page (the [tt_manager_dashboard] shortcode), set in Timesheets → Settings. */
+function tt_manager_dashboard_url() {
+    return get_option('tt_manager_dashboard_url', '') ?: home_url('/manager-dashboard/');
 }
 
-function tt_manager_dashboard_page() {
-    if (!tt_user_is_manager()) {
-        echo '<div class="wrap"><p>You do not have permission to view this page.</p></div>';
-        return;
-    }
+/** wp-admin copy of the Manager Dashboard, for admins/editors who are also managers. */
+function tt_manager_admin_dashboard_url() {
+    return admin_url('admin.php?page=tt-manager-inbox');
+}
 
+add_action('admin_menu', 'tt_add_manager_inbox_menu_v2');
+function tt_add_manager_inbox_menu_v2() {
+    // Only admins/editors who manage people. tt_managers never use wp-admin (see tt_manager_block_wp_admin).
+    if (!tt_user_is_manager() || !current_user_can('edit_posts')) return;
+    $parent = 'edit.php?post_type=timesheet';
+    add_submenu_page($parent, 'Manager Dashboard', 'Manager Dashboard', 'read', 'tt-manager-inbox', 'tt_manager_dashboard_page');
+    add_submenu_page($parent, 'My Team', 'My Team', 'read', 'tt-team-roster', 'tt_team_roster_page');
+}
+
+// Front-end Manager Dashboard: team timesheets with filters, plus the team roster.
+add_shortcode('tt_manager_dashboard', 'tt_manager_dashboard_shortcode');
+function tt_manager_dashboard_shortcode() {
+    if (!defined('DONOTCACHEPAGE')) define('DONOTCACHEPAGE', true);
+    nocache_headers();
+    if (!is_user_logged_in()) {
+        return '<p><strong>Please log in.</strong> <a href="'.esc_url(wp_login_url(get_permalink())).'">Log in</a></p>';
+    }
+    if (!tt_user_is_manager()) {
+        return '<p>This page is for timesheet managers.</p>';
+    }
+    $here = get_permalink() ?: tt_manager_dashboard_url();
+    return tt_render_nav_bar('manager')
+        . tt_render_manager_dashboard($here)
+        . tt_render_team_roster($here)
+        . '<p style="margin-top:24px;"><a href="'.esc_url(wp_lostpassword_url()).'">Change my password</a></p>';
+}
+
+// wp-admin page (admins/editors only; tt_managers use the front-end [tt_manager_dashboard]).
+function tt_manager_dashboard_page() {
+    echo '<div class="wrap">';
+    echo tt_user_is_manager() ? tt_render_manager_dashboard(tt_manager_admin_dashboard_url()) : '<p>You do not have permission to view this page.</p>';
+    echo '</div>';
+}
+
+/**
+ * Manager Dashboard body (filters, status counts, team timesheets). Shared by the
+ * wp-admin page and the front-end shortcode. $base_url is the page it's rendered on.
+ */
+function tt_render_manager_dashboard($base_url) {
+    ob_start();
     $uid = get_current_user_id();
     $is_admin = current_user_can('manage_options');
 
@@ -2043,16 +2122,19 @@ function tt_manager_dashboard_page() {
         'approved'      => 'Approved',
     ];
 
-    $current_url = admin_url('edit.php?post_type=timesheet&page=tt-manager-inbox');
+    $current_url = $base_url;
+    // A GET form drops the action URL's query string, so carry it (e.g. page=, page_id=) as hidden fields.
+    $base_args = [];
+    parse_str((string)parse_url($base_url, PHP_URL_QUERY), $base_args);
     ?>
-    <div class="wrap" id="tt-manager-dashboard">
-        <h1 class="wp-heading-inline">Manager Dashboard</h1>
-        <hr class="wp-header-end">
+    <div id="tt-manager-dashboard">
+        <h2>Manager Dashboard</h2>
 
         <?php // ---- Filters ---- ?>
         <form method="GET" action="<?php echo esc_url($current_url); ?>" style="margin:16px 0 20px; display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">
-            <input type="hidden" name="post_type" value="timesheet">
-            <input type="hidden" name="page" value="tt-manager-inbox">
+            <?php foreach ($base_args as $k => $v): if (is_string($v)): ?>
+                <input type="hidden" name="<?php echo esc_attr($k); ?>" value="<?php echo esc_attr($v); ?>">
+            <?php endif; endforeach; ?>
 
             <?php if (count($emp_users) > 1): ?>
             <div>
@@ -2169,7 +2251,8 @@ function tt_manager_dashboard_page() {
                 $view_url    = get_permalink($tsid);
                 $edit_url    = get_edit_post_link($tsid);
                 $approve_url = wp_nonce_url(admin_url('admin-post.php?action=tt_manager_action&do=approve&timesheet_id='.$tsid), 'tt_manager_action_approve_'.$tsid);
-                $chg_url     = wp_nonce_url(admin_url('admin-post.php?action=tt_manager_action&do=request_changes&timesheet_id='.$tsid), 'tt_manager_action_request_changes_'.$tsid);
+                // Request Changes needs a note, so it's a form on the timesheet page.
+                $chg_url     = $view_url . '#tt-request-changes';
             ?>
             <tr>
                 <td><strong><?php echo esc_html($emp_u ? $emp_u->display_name : '—'); ?></strong></td>
@@ -2184,14 +2267,18 @@ function tt_manager_dashboard_page() {
                 <td><strong><?php echo number_format(floatval($grand), 2); ?></strong></td>
                 <td><?php echo esc_html(get_the_modified_date('M j, Y g:ia')); ?></td>
                 <td style="white-space:nowrap;">
-                    <a class="button button-small" href="<?php echo esc_url($view_url); ?>" target="_blank">View</a>
-                    <?php if (tt_user_can_manage_timesheet($tsid)): ?>
+                    <?php // Unsubmitted drafts are still the employee's own; WordPress only shows draft posts to users who can edit them. ?>
+                    <?php if (get_post_status($tsid) === 'publish' || current_user_can('edit_post', $tsid)): ?>
+                        <a class="button button-small" href="<?php echo esc_url($view_url); ?>" target="_blank">View</a>
+                    <?php endif; ?>
+                    <?php if (current_user_can('edit_post', $tsid)): ?>
                         <a class="button button-small" href="<?php echo esc_url($edit_url); ?>">Edit</a>
-                        <?php if (in_array($state, ['submitted', 'needs_changes'], true)): ?>
+                    <?php endif; ?>
+                    <?php if (tt_user_can_manage_timesheet($tsid)): ?>
+                        <?php if ($state === 'submitted'): ?>
                             <a class="button button-small button-primary" href="<?php echo esc_url($approve_url); ?>"
                                onclick="return confirm('Approve this timesheet?');">Approve</a>
-                            <a class="button button-small" href="<?php echo esc_url($chg_url); ?>"
-                               onclick="return confirm('Send back for changes?');">Request Changes</a>
+                            <a class="button button-small" href="<?php echo esc_url($chg_url); ?>">Request Changes</a>
                         <?php endif; ?>
                     <?php endif; ?>
                 </td>
@@ -2209,7 +2296,7 @@ function tt_manager_dashboard_page() {
             Showing <?php echo esc_html($showing_from); ?>&#8211;<?php echo esc_html($showing_to); ?> of <?php echo esc_html($total_found); ?> timesheet(s).
         </p>
         <?php if ($total_pages > 1):
-            $base_url = add_query_arg(array_filter([
+            $page_base = add_query_arg(array_filter([
                 'filter_emp'    => $filter_emp    ?: null,
                 'filter_status' => $filter_status ?: null,
                 'filter_from'   => $filter_from   ?: null,
@@ -2218,7 +2305,7 @@ function tt_manager_dashboard_page() {
         ?>
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:12px;">
             <?php if ($paged > 1): ?>
-                <a class="button" href="<?php echo esc_url(add_query_arg('ts_paged', $paged - 1, $base_url)); ?>">&laquo; Prev</a>
+                <a class="button" href="<?php echo esc_url(add_query_arg('ts_paged', $paged - 1, $page_base)); ?>">&laquo; Prev</a>
             <?php endif; ?>
             <?php for ($p = 1; $p <= $total_pages; $p++):
                 $is_active = ($p === $paged);
@@ -2226,12 +2313,12 @@ function tt_manager_dashboard_page() {
                     ? 'display:inline-block;padding:4px 10px;border-radius:4px;background:#2271b1;color:#fff;text-decoration:none;font-weight:bold;border:1px solid #2271b1;'
                     : 'display:inline-block;padding:4px 10px;border-radius:4px;background:#f0f0f0;color:#333;text-decoration:none;border:1px solid #ccc;';
             ?>
-                <a href="<?php echo esc_url(add_query_arg('ts_paged', $p, $base_url)); ?>"
+                <a href="<?php echo esc_url(add_query_arg('ts_paged', $p, $page_base)); ?>"
                    style="<?php echo esc_attr($btn_style); ?>"
                    aria-current="<?php echo $is_active ? 'page' : 'false'; ?>"><?php echo esc_html($p); ?></a>
             <?php endfor; ?>
             <?php if ($paged < $total_pages): ?>
-                <a class="button" href="<?php echo esc_url(add_query_arg('ts_paged', $paged + 1, $base_url)); ?>">Next &raquo;</a>
+                <a class="button" href="<?php echo esc_url(add_query_arg('ts_paged', $paged + 1, $page_base)); ?>">Next &raquo;</a>
             <?php endif; ?>
             <span style="color:#666;font-size:12px;margin-left:4px;">Page <?php echo esc_html($paged); ?> of <?php echo esc_html($total_pages); ?></span>
         </div>
@@ -2245,81 +2332,42 @@ function tt_manager_dashboard_page() {
     #tt-manager-dashboard .button-small { font-size: 11px !important; padding: 2px 8px !important; height: auto !important; line-height: 1.6 !important; }
     </style>
     <?php
+    return ob_get_clean();
 }
 
 
-// =============================================================================
-// === CAPABILITY: Allow tt_manager to edit timesheets in WP admin =============
-// =============================================================================
-
-add_filter('map_meta_cap', 'tt_manager_timesheet_caps', 10, 4);
-function tt_manager_timesheet_caps($caps, $cap, $user_id, $args) {
-    // Allow tt_managers to edit/read any timesheet post
-    if (!in_array($cap, ['edit_post', 'read_post', 'delete_post'], true)) return $caps;
-    if (empty($args[0])) return $caps;
-    $post = get_post($args[0]);
-    if (!$post || $post->post_type !== 'timesheet') return $caps;
-
-    $user = get_userdata($user_id);
-    if (!$user || !in_array('tt_manager', (array)$user->roles, true)) return $caps;
-
-    // Only allow if this manager is assigned to the employee
-    if (tt_user_can_manage_timesheet($post->ID, $user_id)) {
-        return ['exist']; // effectively grants the cap
-    }
-    return $caps;
-}
-
-// Allow tt_managers to save timesheet meta (the save_post nonce check uses edit_post cap)
-add_filter('user_has_cap', 'tt_manager_edit_timesheet_cap', 10, 4);
-function tt_manager_edit_timesheet_cap($allcaps, $caps, $args, $user) {
-    if (empty($user) || !in_array('tt_manager', (array)$user->roles, true)) return $allcaps;
-    // Grant edit_posts so the admin metabox save handler works
-    if (isset($args[0]) && in_array($args[0], ['edit_posts', 'edit_post'], true)) {
-        // Only grant for timesheet context — we can't always tell here, so grant broadly for tt_manager
-        $allcaps['edit_posts'] = true;
-    }
-    return $allcaps;
-}
+// tt_managers deliberately get no WordPress edit/delete capabilities. They view their
+// team's sheets via tt_user_can_view_timesheet() and approve via tt_manager_action_handler(),
+// both of which check the assignment with tt_user_can_manage_timesheet().
 
 
 // =============================================================================
 // === TEAM ROSTER: Admin submenu showing manager's employees ==================
 // =============================================================================
 
-add_action('admin_menu', 'tt_add_team_roster_menu');
-function tt_add_team_roster_menu() {
-    add_submenu_page(
-        'edit.php?post_type=timesheet',
-        'My Team',
-        'My Team',
-        'read',
-        'tt-team-roster',
-        'tt_team_roster_page'
-    );
+// wp-admin My Team page (registered in tt_add_manager_inbox_menu_v2()).
+function tt_team_roster_page() {
+    echo '<div class="wrap">';
+    echo tt_user_is_manager() ? tt_render_team_roster(tt_manager_admin_dashboard_url()) : '<p>You do not have permission to view this page.</p>';
+    echo '</div>';
 }
 
-function tt_team_roster_page() {
-    if (!tt_user_is_manager()) {
-        echo '<div class="wrap"><p>You do not have permission to view this page.</p></div>';
-        return;
-    }
-
+/** My Team table; "View Timesheets" links filter the dashboard at $dashboard_url. */
+function tt_render_team_roster($dashboard_url) {
+    ob_start();
     $uid      = get_current_user_id();
     $is_admin = current_user_can('manage_options');
     $emp_ids  = $is_admin
         ? get_users(['fields' => 'ID', 'number' => 999])
         : get_users(['meta_key' => 'tt_manager_user_id', 'meta_value' => $uid, 'fields' => 'ID', 'number' => 999]);
 
-    $current_url = admin_url('edit.php?post_type=timesheet&page=tt-manager-inbox');
+    $current_url = $dashboard_url;
 
-    echo '<div class="wrap">';
-    echo '<h1>My Team</h1>';
+    echo '<h2>My Team</h2>';
 
     if (empty($emp_ids)) {
         echo '<div class="notice notice-warning inline"><p>No employees are assigned to you. Ask an admin to assign employees via <strong>Users → Edit User → Manager</strong>.</p></div>';
-        echo '</div>';
-        return;
+        return ob_get_clean();
     }
 
     echo '<table class="wp-list-table widefat fixed striped">';
@@ -2354,6 +2402,6 @@ function tt_team_roster_page() {
     }
 
     echo '</tbody></table>';
-    echo '</div>';
+    return ob_get_clean();
 }
 
