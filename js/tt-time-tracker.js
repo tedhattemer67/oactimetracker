@@ -118,6 +118,17 @@
       recalcAll();
     }
 
+    // Admin/manager employee dropdown: mirror the selected option's user ID into the
+    // hidden override field. Done before the first load so it asks for the right employee.
+    const empSelect = document.getElementById('employee-select');
+    const empUidField = document.getElementById('tt-employee-uid-override');
+    function ttSyncEmployeeUid(){
+      if(!empSelect || !empUidField || empSelect.tagName !== 'SELECT') return;
+      const opt = empSelect.options[empSelect.selectedIndex];
+      empUidField.value = (opt && opt.dataset.uid) || '';
+    }
+    ttSyncEmployeeUid();
+
     buildDropdown();
     sel.on('change', () => buildGrids(sel.val()));
     buildGrids(sel.val());
@@ -247,6 +258,7 @@
       const hiddenTid = (document.getElementById('tt-timesheet-id')||{}).value || '';
       const tid = qsTid || hiddenTid;
       if(tid) data.append('timesheet_id', tid);
+      if(empUidField && empUidField.value) data.append('employee_uid', empUidField.value);
       data.append('nonce', TT_AJAX.nonce || '');
 
       fetch(TT_AJAX.ajax_url, {method:'POST', credentials:'same-origin', body:data})
@@ -284,6 +296,19 @@
       pp.addEventListener('change', function(){
         const val = this.value;
         ttLoadMyTimesheet(val);
+      });
+    }
+
+    // On employee change (admins/managers), blank the grid and load that employee's sheet.
+    if(empSelect && empSelect.tagName === 'SELECT'){
+      empSelect.addEventListener('change', function(){
+        ttSyncEmployeeUid();
+        buildGrids(sel.val());
+        const idField = document.getElementById('tt-timesheet-id');
+        if(idField) idField.value = '';
+        ttSetLocked(false);
+        ttSetStatus('');
+        ttLoadMyTimesheet(sel.val());
       });
     }
 

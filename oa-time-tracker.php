@@ -76,15 +76,24 @@ function oac_time_tracker_shortcode(){
     }
 
 
-    // Query WP users instead of the Employee CPT so the dropdown reflects
-    // actual site accounts. Exclude admins from the selectable list; they
-    // can still submit their own sheets but are unlikely to be tracked employees.
-    $emps = get_users([
-        'orderby'      => 'display_name',
-        'order'        => 'ASC',
-        'role__not_in' => ['administrator'],
-        'number'       => 999,
-    ]);
+    // Employee dropdown (admins and managers only). Admins see every non-admin
+    // account; managers see only the employees assigned to them. Both also get
+    // themselves (listed first) so they can fill in their own sheet.
+    $tt_user = wp_get_current_user();
+    $tt_emp_name = ($tt_user && $tt_user->exists()) ? $tt_user->display_name : '';
+    $tt_emp_uid  = ($tt_user && $tt_user->exists()) ? $tt_user->ID : 0;
+    $tt_can_choose_emp = tt_user_can_choose_employee();
+    $emps = [];
+    if($tt_can_choose_emp){
+        $emp_args = ['orderby'=>'display_name', 'order'=>'ASC', 'number'=>999, 'exclude'=>[$tt_emp_uid]];
+        if(current_user_can('manage_options')){
+            $emp_args['role__not_in'] = ['administrator'];
+        } else {
+            $emp_args['meta_key']   = 'tt_manager_user_id';
+            $emp_args['meta_value'] = $tt_emp_uid;
+        }
+        $emps = array_merge([$tt_user], get_users($emp_args));
+    }
     ob_start(); ?>
     <form action="<?php echo esc_url(admin_url('admin-post.php')); ?>" method="POST">
         <?php wp_nonce_field('tt_submit_timesheet','tt_nonce'); ?>
@@ -102,16 +111,10 @@ function oac_time_tracker_shortcode(){
           <p><strong>Employee:</strong> <span id="print-employee"></span>
              &nbsp;<strong>Period:</strong> <span id="print-period"></span></p>
         </div>
-        <?php
-        $tt_user = wp_get_current_user();
-        $tt_emp_name = ($tt_user && $tt_user->exists()) ? $tt_user->display_name : '';
-        $tt_emp_uid  = ($tt_user && $tt_user->exists()) ? $tt_user->ID : 0;
-        $tt_can_choose_emp = current_user_can('edit_others_posts') || current_user_can('manage_options');
-      ?>
       <label for="employee-select">Employee:</label>
       <?php if($tt_can_choose_emp): ?>
-        <select id="employee-select" name="employee"
-                onchange="document.getElementById('tt-employee-uid-override').value = this.options[this.selectedIndex].dataset.uid;">
+        <?php /* tt-time-tracker.js syncs the selected data-uid into #tt-employee-uid-override and reloads the sheet. */ ?>
+        <select id="employee-select" name="employee">
           <?php foreach($emps as $emp): ?>
             <option value="<?php echo esc_attr($emp->display_name); ?>"
                     data-uid="<?php echo intval($emp->ID); ?>"
@@ -120,15 +123,6 @@ function oac_time_tracker_shortcode(){
             </option>
           <?php endforeach; ?>
         </select>
-        <script>
-          // Seed the hidden UID field on page load so it's populated even without
-          // the user touching the dropdown.
-          (function(){
-            var sel = document.getElementById('employee-select');
-            var uid = document.getElementById('tt-employee-uid-override');
-            if(sel && uid) uid.value = sel.options[sel.selectedIndex].dataset.uid || '';
-          })();
-        </script>
       <?php else: ?>
         <input type="hidden" name="employee" id="employee-select" value="<?php echo esc_attr($tt_emp_name); ?>">
         <p style="margin-top:0;"><strong><?php echo esc_html($tt_emp_name); ?></strong></p>
@@ -267,61 +261,25 @@ function ttc_handle_submission(){
     }
     $start = DateTime::createFromFormat('Y-m-d', $start_raw);
     $end = clone $start; $end->modify('+13 days');
-    $employee = sanitize_text_field($_POST['employee'] ?? '');
-    $u = wp_get_current_user();
-    $current_name = ($u && $u->exists()) ? $u->display_name : '';
-    $can_override = current_user_can('edit_others_posts') || current_user_can('manage_options');
-
-    // When an admin/manager submits on behalf of someone else, use the WP user ID
-    // that was passed via the hidden employee_user_id_override field (populated by the
-    // dropdown's data-uid attribute). Fall back to the current user for regular employees.
+    // Determine whose timesheet this is. Admins and managers may pick an employee in
+    // the dropdown (sent as employee_user_id_override); managers only for their own
+    // assigned employees. Everyone else always files for themselves.
+    $uid = get_current_user_id();
+    $target_uid = $uid;
     $employee_uid_override = intval($_POST['employee_user_id_override'] ?? 0);
-    if($can_override && $employee_uid_override){
-        $override_user = get_userdata($employee_uid_override);
-        if($override_user){
-            $employee = $override_user->display_name;
-            // $employee_uid_override is already set and will be used below
+    if($employee_uid_override && $employee_uid_override !== $uid && tt_user_can_choose_employee()){
+        if(!tt_user_can_file_for($employee_uid_override)){
+            wp_die('You are not allowed to submit a timesheet for that employee.', 'Not allowed', ['response' => 403]);
         }
+        $target_uid = $employee_uid_override;
     }
-
-    // Enforce employee to current user unless admin/manager override
-    if(!$can_override){
-        $employee = $current_name ?: 'EMPLOYEE';
-        $employee_uid_override = 0; // ensure non-admins cannot spoof this field
-    }
-    if(!$employee){
-        $employee = $current_name ?: 'EMPLOYEE';
-    }
-    // Enforce employee to current user
+    $target_user = get_userdata($target_uid);
+    $employee = ($target_user && $target_user->display_name) ? $target_user->display_name : 'EMPLOYEE';
     $title = $end->format('n-j-Y') . '-' . strtoupper(str_replace(' ','-',$employee));
-        // Option A: one timesheet per user per pay period
-    $existing_id = 0;
-    $ts_id_from_form = intval($_POST['timesheet_id'] ?? 0);
-    if($ts_id_from_form){
-        $p = get_post($ts_id_from_form);
-        if($p && $p->post_type==='timesheet'){
-            $uid = get_current_user_id();
-            $emp_uid = intval(get_post_meta($ts_id_from_form,'employee_user_id',true));
-            if(intval($p->post_author)===$uid || $emp_uid===$uid){
-                $existing_id = $ts_id_from_form;
-            }
-        }
-    }
-    if(!$existing_id){
-        $q_exist = new WP_Query([
-            'post_type'=>'timesheet',
-            'author'=>get_current_user_id(),
-            'post_status'=>['draft','publish'],
-            'posts_per_page'=>1,
-            'meta_key'=>'tt_period_start',
-            'meta_value'=>$start_raw,
-        ]);
-        if($q_exist->have_posts()){
-            $q_exist->the_post();
-            $existing_id = get_the_ID();
-            wp_reset_postdata();
-        }
-    }
+
+    // One timesheet per employee per pay period. Looked up by the target employee (not
+    // the submitter) so on-behalf saves update the employee's sheet instead of duplicating it.
+    $existing_id = tt_find_timesheet_for($target_uid, $start_raw, intval($_POST['timesheet_id'] ?? 0));
 
     // Prevent editing submitted/approved sheets. Checked against the resolved
     // $existing_id (not just a posted timesheet_id) so clearing the form's hidden
@@ -330,7 +288,7 @@ function ttc_handle_submission(){
         $existing_state = get_post_meta($existing_id,'tt_state',true);
         if(in_array($existing_state, ['submitted','approved'], true)){
             wp_die(
-                'Your timesheet for this pay period has already been '.esc_html($existing_state).' and is locked. '
+                'This timesheet for this pay period has already been '.esc_html($existing_state).' and is locked. '
                 .($existing_state === 'submitted' ? 'Withdraw the submission first if you need to make changes. ' : '')
                 .'<a href="'.esc_url(get_permalink($existing_id)).'">View timesheet</a>',
                 'Timesheet locked',
@@ -343,18 +301,11 @@ function ttc_handle_submission(){
         $post_id = $existing_id;
         wp_update_post(['ID'=>$post_id,'post_title'=>$title,'post_status'=>($tt_action==='draft'?'draft':'publish')]);
     } else {
-        $post_id = wp_insert_post(['post_type'=>'timesheet','post_title'=>$title,'post_status'=>($tt_action === 'draft' ? 'draft' : 'publish'),'post_author'=>get_current_user_id()]);
+        $post_id = wp_insert_post(['post_type'=>'timesheet','post_title'=>$title,'post_status'=>($tt_action === 'draft' ? 'draft' : 'publish'),'post_author'=>$target_uid]);
     }
-    
+
     // Catch insert/update errors before proceeding.
     if(is_wp_error($post_id)) wp_die('Error saving timesheet: ' . $post_id->get_error_message());
-
-    // Determine whose timesheet this really is.
-    // - Regular employees: always their own user ID.
-    // - Admins/managers: use the override UID from the dropdown if provided,
-    //   otherwise fall back to their own ID (e.g. admin filling their own sheet).
-    $uid = get_current_user_id();
-    $target_uid = ($can_override && $employee_uid_override) ? $employee_uid_override : $uid;
 
     // Ensure ownership is set correctly (used for draft loading and manager inbox queries).
     if($post_id){
@@ -406,10 +357,9 @@ function ttc_handle_submission(){
 
     // Employee signature: record on submit, clear on draft/needs_changes
     if ( $new_state === 'submitted' ) {
-        $submitter_uid = get_current_user_id();
         update_post_meta( $post_id, 'tt_employee_signed',    1 );
         update_post_meta( $post_id, 'tt_employee_signed_at', current_time('mysql', true) ); // UTC
-        update_post_meta( $post_id, 'tt_employee_signed_by', $submitter_uid );
+        update_post_meta( $post_id, 'tt_employee_signed_by', $uid );
         // Clear any previous manager signature — the data changed
         delete_post_meta( $post_id, 'tt_manager_signed' );
         delete_post_meta( $post_id, 'tt_manager_signed_at' );
@@ -1407,52 +1357,25 @@ function tt_ajax_get_my_timesheet(){
         wp_send_json_error(['message'=>'not_logged_in'], 403);
     }
 
-    $timesheet_id = intval($_POST['timesheet_id'] ?? 0);
-    if($timesheet_id){
-        $p = get_post($timesheet_id);
-        if(!$p || $p->post_type !== 'timesheet'){
-            wp_send_json_error(['message'=>'not_found'], 404);
-        }
-        $uid = get_current_user_id();
-        $emp_uid = intval(get_post_meta($timesheet_id,'employee_user_id',true));
-        if(intval($p->post_author) !== $uid && $emp_uid !== $uid){
-            wp_send_json_error(['message'=>'not_allowed'], 403);
-        }
-        $data  = get_post_meta($timesheet_id,'tt_data',true);
-        $state = get_post_meta($timesheet_id,'tt_state',true);
-        if(!$state){ $state = (get_post_status($timesheet_id)==='draft') ? 'draft' : 'submitted'; }
-        wp_send_json_success([
-            'found'=>true,
-            'timesheet_id'=>$timesheet_id,
-            'state'=>$state,
-            'data'=>$data,
-        ]);
-    }
-
     $pay_period = sanitize_text_field($_POST['pay_period'] ?? '');
     if(!$pay_period){
         wp_send_json_error(['message'=>'missing_pay_period'], 400);
     }
 
-    $q = new WP_Query([
-        'post_type' => 'timesheet',
-        'author' => get_current_user_id(),
-        'post_status' => ['draft','publish'],
-        'posts_per_page' => 1,
-        'meta_key' => 'tt_period_start',
-        'meta_value' => $pay_period,
-    ]);
+    // Whose sheet to load: the employee picked in the dropdown (admins/managers), else self.
+    $target_uid = intval($_POST['employee_uid'] ?? 0) ?: get_current_user_id();
+    if(!tt_user_can_file_for($target_uid)){
+        wp_send_json_error(['message'=>'not_allowed'], 403);
+    }
 
-    if(!$q->have_posts()){
+    $id = tt_find_timesheet_for($target_uid, $pay_period, intval($_POST['timesheet_id'] ?? 0));
+    if(!$id){
         wp_send_json_success(['found'=>false]);
     }
 
-    $q->the_post();
-    $id = get_the_ID();
     $data = get_post_meta($id,'tt_data',true);
     $state = get_post_meta($id,'tt_state',true);
     if(!$state){ $state = (get_post_status($id)==='draft') ? 'draft' : 'submitted'; }
-    wp_reset_postdata();
 
     wp_send_json_success([
         'found' => true,
@@ -1900,6 +1823,62 @@ function tt_user_can_manage_timesheet($timesheet_id, $user_id = null) {
     $emp_uid    = intval(get_post_meta($timesheet_id, 'employee_user_id', true));
     $manager_id = $emp_uid ? intval(get_user_meta($emp_uid, 'tt_manager_user_id', true)) : 0;
     return ($manager_id && $manager_id === $user_id);
+}
+
+/**
+ * Can this user fill in timesheets on behalf of other employees (i.e. see the
+ * Employee dropdown)? Admins and the tt_manager role only — not editors.
+ */
+function tt_user_can_choose_employee($user_id = null) {
+    if (!$user_id) $user_id = get_current_user_id();
+    if (!$user_id) return false;
+    if (user_can($user_id, 'manage_options')) return true;
+    $user = get_userdata($user_id);
+    return $user && in_array('tt_manager', (array)$user->roles, true);
+}
+
+/**
+ * Can this user save/load the timesheet of $target_uid? Everyone can for themselves;
+ * admins for anyone; a tt_manager only for employees assigned to them.
+ */
+function tt_user_can_file_for($target_uid, $user_id = null) {
+    if (!$user_id) $user_id = get_current_user_id();
+    $target_uid = intval($target_uid);
+    if (!$user_id || !$target_uid) return false;
+    if ($target_uid === $user_id) return true;
+    if (!tt_user_can_choose_employee($user_id) || !get_userdata($target_uid)) return false;
+    if (user_can($user_id, 'manage_options')) return true;
+    return intval(get_user_meta($target_uid, 'tt_manager_user_id', true)) === $user_id;
+}
+
+/**
+ * Find the timesheet belonging to $target_uid for the pay period starting $period_start.
+ * A $preferred_id is used if it belongs to that employee and period; otherwise falls
+ * back to the employee+period lookup. Returns 0 if none exists.
+ */
+function tt_find_timesheet_for($target_uid, $period_start, $preferred_id = 0) {
+    $preferred_id = intval($preferred_id);
+    if ($preferred_id) {
+        $p = get_post($preferred_id);
+        if ($p && $p->post_type === 'timesheet') {
+            $owner = intval(get_post_meta($preferred_id, 'employee_user_id', true)) ?: intval($p->post_author);
+            if ($owner === intval($target_uid) && get_post_meta($preferred_id, 'tt_period_start', true) === $period_start) {
+                return $preferred_id;
+            }
+        }
+    }
+    $ids = get_posts([
+        'post_type'      => 'timesheet',
+        'author'         => intval($target_uid),
+        'post_status'    => ['draft','publish'],
+        'posts_per_page' => 1,
+        'orderby'        => 'modified',
+        'order'          => 'DESC',
+        'meta_key'       => 'tt_period_start',
+        'meta_value'     => $period_start,
+        'fields'         => 'ids',
+    ]);
+    return $ids ? intval($ids[0]) : 0;
 }
 
 // Grant tt_manager role users access to admin dashboard (read-only by default in WP)
