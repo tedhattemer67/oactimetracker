@@ -6,7 +6,7 @@ Version: 1.0
 Author: Ted Hattemer
 */
 
-// Standalone plugin, separate from OAC Time Tracker: install this folder as its own plugin
+// Standalone plugin, separate from Time Tracker: install this folder as its own plugin
 // (wp-content/plugins/oac-password-reset/). WordPress does not scan this subfolder when it sits
 // inside the time tracker plugin, so it is never loaded from there.
 
@@ -228,7 +228,7 @@ function oac_pwr_render_log() {
 // --- Forcing the change at next login --------------------------------------------------
 
 // Straight after login, send flagged users to the change screen, keeping wherever they were
-// headed (runs after OAC Time Tracker's own login_redirect, so its manager redirect is kept).
+// headed (runs after Time Tracker's own login_redirect, so its manager redirect is kept).
 add_filter('login_redirect', function ($redirect_to, $requested, $user) {
     if (!($user instanceof WP_User) || !oac_pwr_must_change($user->ID)) return $redirect_to;
     return oac_pwr_change_url($redirect_to);

@@ -1,6 +1,6 @@
 <?php
 /*
-Plugin Name: OAC Time Tracker Full Fixed
+Plugin Name: Time Tracker
 Description: Biweekly time and PTO tracking form with Timesheet CPT creation.
 Version: 1.0
 Author: Ted Hattemer

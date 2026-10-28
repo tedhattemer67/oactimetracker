@@ -1,7 +1,7 @@
 <?php
 /*
-Plugin Name: OAC Time Tracker – Demo Data
-Description: Seeds demo managers, employees and timesheets for OAC Time Tracker, and removes them again. Tools → TT Demo Data, or `wp tt-demo seed|clear`. Not for production.
+Plugin Name: Time Tracker – Demo Data
+Description: Seeds demo managers, employees and timesheets for Time Tracker, and removes them again. Tools → TT Demo Data, or `wp tt-demo seed|clear`. Not for production.
 Version: 1.0
 Author: Ted Hattemer
 */
@@ -216,7 +216,7 @@ function tt_demo_admin_page() {
     if (!current_user_can('manage_options')) return;
     $msg = '';
     if (!function_exists('tt_calculate_totals')) {
-        $msg = 'OAC Time Tracker must be active.';
+        $msg = 'Time Tracker must be active.';
     } elseif (isset($_POST['tt_demo_do']) && check_admin_referer('tt_demo_data')) {
         if ($_POST['tt_demo_do'] === 'seed') {
             $pw = (string) wp_unslash($_POST['tt_demo_password'] ?? '');
@@ -259,7 +259,7 @@ if (defined('WP_CLI') && WP_CLI) {
     WP_CLI::add_command('tt-demo', new class {
         /** Seed demo users and timesheets. [--periods=<n>] [--password=<pw>] */
         public function seed($args, $assoc) {
-            if (!function_exists('tt_calculate_totals')) WP_CLI::error('OAC Time Tracker must be active.');
+            if (!function_exists('tt_calculate_totals')) WP_CLI::error('Time Tracker must be active.');
             $s =tt_demo_seed(intval($assoc['periods'] ?? 6), $assoc['password'] ?? 'demo');
             WP_CLI::success("Seeded {$s['users']} users and {$s['timesheets']} timesheets.");
         }

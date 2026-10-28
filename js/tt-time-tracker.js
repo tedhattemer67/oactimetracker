@@ -32,7 +32,7 @@
         let st = addDays(anchor, i*14);
       if(st.getDay() !== 0){
         const delta = (7 - st.getDay()) % 7; // Saturday->+1
-        console.warn('[OAC Time Tracker] Pay period start not Sunday; auto-normalizing.', st);
+        console.warn('[Time Tracker] Pay period start not Sunday; auto-normalizing.', st);
         st = addDays(st, delta);
       }
         let en = addDays(st, 13);
@@ -319,7 +319,7 @@
           if(!res){ ttSetStatus('Could not load saved timesheet.'); return; }
           if(!res.success){
             ttSetStatus('Could not load saved timesheet (' + ((res && res.data && res.data.message) ? res.data.message : 'error') + ').');
-            console.warn('[OAC Time Tracker] AJAX load failed', res);
+            console.warn('[Time Tracker] AJAX load failed', res);
             return;
           }
           if(!res.data || !res.data.found){
