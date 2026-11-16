@@ -213,6 +213,9 @@ function tt_audit_summary($row) {
             elseif (!empty($d['same_person'])) $s .= ' (filed and approved by same person)';
             if (isset($d['total'])) $s .= ', ' . $hrs($d['total']);
             break;
+        case 'unapproved':
+            if (!empty($d['after_lock'])) $s .= ' (admin override after payroll lock)';
+            break;
         case 'admin_edited':
             if (isset($d['total_from'], $d['total_to']) && $d['total_from'] != $d['total_to']) {
                 $s .= ', total ' . $hrs($d['total_from']) . ' → ' . $hrs($d['total_to']);

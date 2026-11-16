@@ -587,6 +587,9 @@ function tt_render_timesheet_metabox(\WP_Post $post) {
     echo '<h4>' . esc_html__( 'Note to employee', 'oac' ) . '</h4>';
     if ( in_array( $state, ['submitted', 'approved'], true ) ) {
         echo '<p class="description" style="color:#b32d2e;">' . esc_html__( 'This timesheet is signed. If you change the hours or period and save, it goes back to the employee as Needs Changes, both signatures are cleared, and the employee must resubmit.', 'oac' ) . '</p>';
+        if ( $state === 'approved' && tt_is_payroll_locked( $post->ID ) ) {
+            echo '<p class="description" style="color:#b32d2e;"><strong>' . esc_html__( 'Past the payroll lock:', 'oac' ) . '</strong> ' . esc_html__( 'this pay period ended more than 7 days ago and payroll has likely already used this timesheet. Coordinate any correction with payroll.', 'oac' ) . '</p>';
+        }
     }
     echo '<textarea name="tt_admin_changes_note" rows="2" style="width:100%;" placeholder="' . esc_attr__( 'Optional: explain what you changed. Shown to the employee when the sheet is sent back.', 'oac' ) . '"></textarea>';
 
@@ -1704,8 +1707,16 @@ function tt_render_timesheet_content_from_meta($content){
     // Assigned manager/Admin: Approve + Request Changes while submitted; on an approved sheet,
     // Un-approve & Send Back (same handler, see tt_manager_action_handler).
     $changes_form = '';
-    if( tt_user_can_manage_timesheet($post->ID) && in_array($state, ['submitted','approved'], true) ){
+    $locked_for_me = ($state === 'approved' && tt_user_can_manage_timesheet($post->ID) && !tt_user_can_unapprove($post->ID));
+    if($locked_for_me){
+        $lock = tt_payroll_lock_date($post->ID);
+        $actions_html .= ' <span style="color:#555;">&#128274; Locked'.($lock ? ' since '.esc_html($lock->format('M j, Y')) : '')
+            .': the pay period ended more than 7 days ago. Contact an administrator if it must be corrected.</span>';
+    }
+    if( tt_user_can_manage_timesheet($post->ID) && in_array($state, ['submitted','approved'], true) && !$locked_for_me ){
         $is_approved = ($state === 'approved');
+        // Admins can still un-approve past the payroll lock; make sure they know payroll may have used it.
+        $admin_override = $is_approved && tt_is_payroll_locked($post->ID);
         if(!$is_approved){
             $approve_url = wp_nonce_url(admin_url('admin-post.php?action=tt_manager_action&do=approve&timesheet_id='.$post->ID), 'tt_manager_action_approve_'.$post->ID);
             $actions_html .= ' <a class="button button-primary" href="'.esc_url($approve_url).'" onclick="return confirm(\'Approve this timesheet?\');">Approve</a>';
@@ -1719,6 +1730,7 @@ function tt_render_timesheet_content_from_meta($content){
             .'<input type="hidden" name="do" value="request_changes">'
             .'<input type="hidden" name="timesheet_id" value="'.intval($post->ID).'">'
             .wp_nonce_field('tt_manager_action_request_changes_'.$post->ID, '_wpnonce', true, false)
+            .($admin_override ? '<p style="margin:0 0 6px;color:#b32d2e;"><strong>Past the payroll lock.</strong> This pay period ended more than 7 days ago and payroll has likely already used this timesheet. Only administrators can un-approve it now; coordinate any correction with payroll.</p>' : '')
             .($is_approved ? '<p style="margin:0 0 6px;">This removes your approval and both signatures. The employee gets an email with your note, makes the changes and resubmits, and then you approve it again.</p>' : '')
             .'<label for="tt-changes-note" style="display:block;font-weight:600;">What needs to change?</label>'
             .'<textarea id="tt-changes-note" name="tt_changes_note" rows="3" required style="width:100%;max-width:600px;"></textarea>'
@@ -1835,6 +1847,10 @@ function tt_manager_action_handler(){
     $state_before = get_post_meta($tsid,'tt_state',true);
     if($action === 'approve' && $state_before !== 'submitted') wp_die('Only submitted timesheets can be approved.');
     if($action === 'request_changes' && !in_array($state_before, ['submitted','approved'], true)) wp_die('Only submitted or approved timesheets can be sent back.');
+    // Payroll lock: past it, only an admin can un-approve.
+    if($action === 'request_changes' && $state_before === 'approved' && !tt_user_can_unapprove($tsid)){
+        wp_die('This timesheet is locked: its pay period ended more than 7 days ago and payroll has likely used it. Contact an administrator if it must be corrected.', 'Timesheet locked', ['response' => 403]);
+    }
 
     if($action === 'approve'){
         update_post_meta($tsid,'tt_state','approved');
@@ -1865,7 +1881,9 @@ function tt_manager_action_handler(){
         delete_post_meta($tsid, 'tt_manager_signed');
         delete_post_meta($tsid, 'tt_manager_signed_at');
         delete_post_meta($tsid, 'tt_manager_signed_by');
-        tt_audit_log($state_before === 'approved' ? 'unapproved' : 'changes_requested', $tsid, ['note' => $note]);
+        $audit = ['note' => $note];
+        if($state_before === 'approved' && tt_is_payroll_locked($tsid)) $audit['after_lock'] = true; // an admin override
+        tt_audit_log($state_before === 'approved' ? 'unapproved' : 'changes_requested', $tsid, $audit);
         tt_notify_employee_changes_requested($tsid, $note, $state_before === 'approved');
     } else {
         wp_die('Unknown action');
@@ -2117,6 +2135,32 @@ function tt_user_can_manage_timesheet($timesheet_id, $user_id = null) {
     $emp_uid    = intval(get_post_meta($timesheet_id, 'employee_user_id', true));
     $manager_id = $emp_uid ? intval(get_user_meta($emp_uid, 'tt_manager_user_id', true)) : 0;
     return ($manager_id && $manager_id === $user_id);
+}
+
+/**
+ * Payroll lock: once a pay period has been over for 7 full days (filter: tt_payroll_lock_days),
+ * payroll has likely used its approved sheets, so managers can no longer un-approve them.
+ * Admins still can. Returns the first locked day (Eastern, midnight), or null if the sheet has no period.
+ * Example: period ends Sat 11/14 → locked from Sun 11/22.
+ */
+function tt_payroll_lock_date($tsid) {
+    $start = get_post_meta($tsid, 'tt_period_start', true);
+    $dt = $start ? DateTime::createFromFormat('!Y-m-d', $start, new DateTimeZone('America/New_York')) : false;
+    if (!$dt) return null;
+    $days = max(0, intval(apply_filters('tt_payroll_lock_days', 7)));
+    return $dt->modify('+' . (13 + $days + 1) . ' days');
+}
+
+function tt_is_payroll_locked($tsid) {
+    $lock = tt_payroll_lock_date($tsid);
+    return $lock && new DateTime('now', new DateTimeZone('America/New_York')) >= $lock;
+}
+
+/** Can this user un-approve (send back) this approved sheet? Managers only until the payroll lock; admins always. */
+function tt_user_can_unapprove($tsid, $user_id = null) {
+    if (!$user_id) $user_id = get_current_user_id();
+    if (!tt_user_can_manage_timesheet($tsid, $user_id)) return false;
+    return !tt_is_payroll_locked($tsid) || user_can($user_id, 'manage_options');
 }
 
 /**
@@ -2509,9 +2553,11 @@ function tt_render_manager_dashboard($base_url) {
                             <a class="button button-small button-primary" href="<?php echo esc_url($approve_url); ?>"
                                onclick="return confirm('Approve this timesheet?');">Approve</a>
                             <a class="button button-small" href="<?php echo esc_url($chg_url); ?>">Request Changes</a>
-                        <?php elseif ($state === 'approved'): ?>
+                        <?php elseif ($state === 'approved' && tt_user_can_unapprove($tsid)): ?>
                             <?php // Undo a mistaken approval: opens the send-back form (with its note) on the timesheet page. ?>
                             <a class="button button-small" href="<?php echo esc_url($chg_url); ?>">Un-approve</a>
+                        <?php elseif ($state === 'approved'): ?>
+                            <span style="color:#787c82;font-size:12px;" title="The pay period ended more than 7 days ago. Only an administrator can un-approve it.">&#128274; Locked</span>
                         <?php endif; ?>
                     <?php endif; ?>
                 </td>
