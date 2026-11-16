@@ -11,6 +11,18 @@ A WordPress plugin for the Ohio Arts Council. Employees fill in and sign biweekl
 
 Pay periods are two weeks long, Sunday to Saturday. They count forward from Sunday, January 11, 2026.
 
+## Email notifications
+
+Plain-text emails go out from `communications@ohioartscouncil.org` (sent through WP Mail SMTP on the live site) when:
+
+| Event | Sent to |
+|---|---|
+| An employee submits a timesheet | The employee's assigned manager |
+| A manager requests changes (or an admin edits a signed sheet) | The employee, with the manager's note and a link to fix it |
+| A manager approves a timesheet | The employee |
+
+Emails go to the address on each user's WordPress account. Nobody is emailed about their own action, and nothing is sent to a manager for an employee who has no manager assigned. A failed send never blocks the action. To change the sender, use the `tt_mail_from` filter. It must match the account WP Mail SMTP is authenticated as.
+
 ## Installation
 
 1. Copy this folder to `wp-content/plugins/` (or upload it as a zip under **Plugins → Add New → Upload Plugin**).

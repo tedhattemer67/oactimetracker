@@ -376,6 +376,11 @@ function ttc_handle_submission(){
         wp_update_post(['ID'=>$post_id,'post_content'=>$html]);
     }
 
+    // Let the employee's manager know there's a sheet to approve.
+    if($new_state === 'submitted' && $prev_state !== 'submitted'){
+        tt_notify_manager_submitted($post_id, $target_uid);
+    }
+
     if($tt_action === 'draft'){
         $ref = wp_get_referer();
         if(!$ref) $ref = home_url('/');
@@ -649,11 +654,15 @@ add_action('save_post_timesheet', function ($post_id) {
         $state = 'needs_changes';
         if ($admin_note === '') $admin_note = 'Your timesheet was edited by an administrator. Please review the changes and resubmit.';
         $GLOBALS['tt_save_notices'][] = 'reopened';
+        $reopened = true;
     }
     if ($state === 'needs_changes' && $admin_note !== '') {
         update_post_meta($post_id, 'tt_changes_note', $admin_note);
         update_post_meta($post_id, 'tt_changes_requested_by', get_current_user_id());
         update_post_meta($post_id, 'tt_changes_requested_at', current_time('mysql', true)); // UTC
+    }
+    if (!empty($reopened)) {
+        tt_notify_employee_changes_requested($post_id, $admin_note);
     }
 
     // Keep the front-end view + PDF source in sync with admin edits by regenerating
@@ -1260,7 +1269,7 @@ function tt_require_login_for_timesheet_pages(){
                 if(!defined('DONOTCACHEPAGE')) define('DONOTCACHEPAGE', true);
                 if(!defined('DONOTCACHEDB')) define('DONOTCACHEDB', true);
                 nocache_headers();
-                wp_redirect(wp_login_url(get_permalink($post)));
+                wp_redirect(wp_login_url(tt_form_return_url(get_permalink($post))));
                 exit;
             }
         }
@@ -1271,9 +1280,18 @@ function tt_require_login_for_timesheet_pages(){
         if(!defined('DONOTCACHEPAGE')) define('DONOTCACHEPAGE', true);
         if(!defined('DONOTCACHEDB')) define('DONOTCACHEDB', true);
         nocache_headers();
-        wp_redirect(wp_login_url(home_url('/')));
+        wp_redirect(wp_login_url(tt_form_return_url(home_url('/'))));
         exit;
     }
+}
+
+/** $url plus the form's deep-link args (pay_period, timesheet_id) from this request, so they survive login. */
+function tt_form_return_url($url) {
+    $args = array_filter([
+        'pay_period'   => tt_normalize_period_start(sanitize_text_field(wp_unslash($_GET['pay_period'] ?? ''))),
+        'timesheet_id' => intval($_GET['timesheet_id'] ?? 0),
+    ]);
+    return $args ? add_query_arg($args, $url) : $url;
 }
 
 // The /timesheets/ archive (and its feed) would otherwise list every employee's sheets
@@ -1726,6 +1744,7 @@ function tt_manager_action_handler(){
         update_post_meta($tsid, 'tt_manager_signed',    1);
         update_post_meta($tsid, 'tt_manager_signed_at', current_time('mysql', true)); // UTC
         update_post_meta($tsid, 'tt_manager_signed_by', $uid);
+        tt_notify_employee_approved($tsid);
     } elseif($action === 'request_changes'){
         $note = sanitize_textarea_field(wp_unslash($_POST['tt_changes_note'] ?? ''));
         if($note === ''){
@@ -1742,6 +1761,7 @@ function tt_manager_action_handler(){
         delete_post_meta($tsid, 'tt_manager_signed');
         delete_post_meta($tsid, 'tt_manager_signed_at');
         delete_post_meta($tsid, 'tt_manager_signed_by');
+        tt_notify_employee_changes_requested($tsid, $note);
     } else {
         wp_die('Unknown action');
     }
@@ -1760,6 +1780,95 @@ function tt_changes_note_html($tsid){
     $who = 'Changes requested' . ($by ? ' by '.$by->display_name : '') . ($at ? ' on '.$at->format('M j, Y \a\t g:i A') : '');
     return '<div class="tt-changes-note" style="margin-top:10px;padding:10px;border-left:4px solid #d63638;background:#fff;">'
         .'<strong>'.esc_html($who).':</strong><br>'.nl2br(esc_html($note)).'</div>';
+}
+
+
+
+// =============================================================================
+// === EMAIL NOTIFICATIONS ======================================================
+// =============================================================================
+// Plain-text emails sent through wp_mail (delivered by WP Mail SMTP on the live site).
+// A failed send never blocks the action that triggered it, and nobody is emailed about
+// their own action (e.g. a manager filling in a sheet for their employee).
+
+/** Sender for Time Tracker emails; must be the account WP Mail SMTP is authenticated as. */
+function tt_mail_from() {
+    return apply_filters('tt_mail_from', 'Ohio Arts Council Time Tracker <communications@ohioartscouncil.org>');
+}
+
+/** Email one user. Returns false (without erroring) if they have no address or it's the current user. */
+function tt_send_mail($user_id, $subject, $body) {
+    $user = get_userdata(intval($user_id));
+    if (!$user || !is_email($user->user_email)) return false;
+    if (intval($user_id) === get_current_user_id()) return false;
+    $headers = ['From: ' . tt_mail_from(), 'Content-Type: text/plain; charset=UTF-8'];
+    return wp_mail($user->user_email, $subject, $body, $headers);
+}
+
+/** "11/1/2026 - 11/14/2026" for a timesheet, or its title if the period is unknown. */
+function tt_period_label($tsid) {
+    $start = get_post_meta($tsid, 'tt_period_start', true);
+    $dt = $start ? DateTime::createFromFormat('Y-m-d', $start) : false;
+    if (!$dt) return get_the_title($tsid);
+    $end = (clone $dt)->modify('+13 days');
+    return $dt->format('n/j/Y') . ' - ' . $end->format('n/j/Y');
+}
+
+/** The employee a timesheet belongs to (user ID). */
+function tt_timesheet_employee_id($tsid) {
+    return intval(get_post_meta($tsid, 'employee_user_id', true)) ?: intval(get_post_field('post_author', $tsid));
+}
+
+/** Display name for a user ID, with a fallback. */
+function tt_user_display_name($uid, $fallback = 'Your manager') {
+    $u = $uid ? get_userdata(intval($uid)) : null;
+    return $u ? $u->display_name : $fallback;
+}
+
+/** To the employee's assigned manager: a timesheet is waiting for approval. */
+function tt_notify_manager_submitted($tsid, $employee_uid) {
+    $manager_id = intval(get_user_meta($employee_uid, 'tt_manager_user_id', true));
+    if (!$manager_id) return false; // no manager assigned; admins still see it on the dashboard
+    $employee = tt_user_display_name($employee_uid, 'An employee');
+    $period   = tt_period_label($tsid);
+    $totals   = get_post_meta($tsid, 'tt_totals', true);
+    $hours    = number_format(floatval(is_array($totals) ? ($totals['grand_total'] ?? 0) : 0), 2);
+
+    $subject = "Timesheet submitted: $employee, $period";
+    $body = "Hello " . tt_user_display_name($manager_id, 'there') . ",\n\n"
+        . "$employee submitted their timesheet for $period and it's waiting for your approval.\n\n"
+        . "Total hours: $hours\n\n"
+        . "Review it, then approve it or request changes:\n" . get_permalink($tsid) . "\n\n"
+        . "All of your team's timesheets are on the Manager Dashboard:\n" . tt_manager_dashboard_url() . "\n";
+    return tt_send_mail($manager_id, $subject, $body);
+}
+
+/** To the employee: their manager (or an admin's edit) sent the sheet back, with the note. */
+function tt_notify_employee_changes_requested($tsid, $note) {
+    $employee_uid = tt_timesheet_employee_id($tsid);
+    $period   = tt_period_label($tsid);
+    $reviewer = tt_user_display_name(get_current_user_id());
+    $fix_url  = add_query_arg(['pay_period' => get_post_meta($tsid, 'tt_period_start', true), 'timesheet_id' => $tsid], home_url('/'));
+
+    $subject = "Changes requested on your timesheet for $period";
+    $body = "Hello " . tt_user_display_name($employee_uid, 'there') . ",\n\n"
+        . "$reviewer sent your timesheet for $period back to you for changes:\n\n"
+        . $note . "\n\n"
+        . "Make the corrections, check the certification box and submit it again:\n" . $fix_url . "\n";
+    return tt_send_mail($employee_uid, $subject, $body);
+}
+
+/** To the employee: their timesheet was approved. */
+function tt_notify_employee_approved($tsid) {
+    $employee_uid = tt_timesheet_employee_id($tsid);
+    $period   = tt_period_label($tsid);
+    $approver = tt_user_display_name(get_post_meta($tsid, 'tt_manager_signed_by', true));
+
+    $subject = "Your timesheet for $period was approved";
+    $body = "Hello " . tt_user_display_name($employee_uid, 'there') . ",\n\n"
+        . "$approver approved your timesheet for $period. No action is needed.\n\n"
+        . "View it:\n" . get_permalink($tsid) . "\n";
+    return tt_send_mail($employee_uid, $subject, $body);
 }
 
 
