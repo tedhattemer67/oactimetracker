@@ -545,21 +545,25 @@ function tt_render_timesheet_metabox(\WP_Post $post) {
     $mgr_signed_at = get_post_meta( $post->ID, 'tt_manager_signed_at', true );
     $mgr_signed_by = intval( get_post_meta( $post->ID, 'tt_manager_signed_by', true ) );
 
-    $fmt_sig = function( $signed, $signed_by, $signed_at ) {
+    $fmt_sig = function( $signed, $signed_by, $signed_at, $flag = '' ) {
         if ( $signed && $signed_by ) {
             $u  = get_userdata( $signed_by );
             $dt = DateTime::createFromFormat( 'Y-m-d H:i:s', $signed_at, new DateTimeZone('UTC') );
             if ( $dt ) $dt->setTimezone( new DateTimeZone('America/New_York') );
             $when = $dt ? $dt->format( 'M j, Y \a\t g:i A T' ) : esc_html( $signed_at );
-            return '<span style="color:#006622;">&#10003; ' . esc_html( $u ? $u->display_name : "User #$signed_by" ) . ' &mdash; ' . esc_html( $when ) . '</span>';
+            return '<span style="color:#006622;">&#10003; ' . esc_html( $u ? $u->display_name : "User #$signed_by" ) . ' &mdash; ' . esc_html( $when ) . '</span>'
+                . ( $flag ? tt_signoff_flag_html( $flag ) : '' );
         }
         return '<span style="color:#999; font-style:italic;">Not yet signed</span>';
     };
+    $flags    = tt_signoff_flags( $post->ID );
+    $emp_flag = $flags['on_behalf'] ? 'Filed on behalf of ' . tt_user_display_name( $flags['employee'], 'the employee' ) : '';
+    $mgr_flag = $flags['self_approved'] ? 'Self-approved' : ( $flags['same_person'] ? 'Filed and approved by same person' : '' );
 
     echo '<h4>' . esc_html__( 'Signatures', 'oac' ) . '</h4>';
     echo '<table class="widefat" id="tt-signatures-admin"><tbody>';
-    echo '<tr><th style="width:140px;">' . esc_html__( 'Employee', 'oac' ) . '</th><td>' . $fmt_sig( $emp_signed, $emp_signed_by, $emp_signed_at ) . '</td></tr>';
-    echo '<tr><th>' . esc_html__( 'Manager', 'oac' ) . '</th><td>' . $fmt_sig( $mgr_signed, $mgr_signed_by, $mgr_signed_at ) . '</td></tr>';
+    echo '<tr><th style="width:140px;">' . esc_html__( 'Employee', 'oac' ) . '</th><td>' . $fmt_sig( $emp_signed, $emp_signed_by, $emp_signed_at, $emp_flag ) . '</td></tr>';
+    echo '<tr><th>' . esc_html__( 'Manager', 'oac' ) . '</th><td>' . $fmt_sig( $mgr_signed, $mgr_signed_by, $mgr_signed_at, $mgr_flag ) . '</td></tr>';
     echo '</tbody></table>';
     echo '<p class="description" style="margin-top:6px;">' . esc_html__( 'Signatures are recorded automatically when an employee submits or a manager approves. They clear if the timesheet is sent back for changes.', 'oac' ) . '</p>';
 
@@ -694,6 +698,31 @@ add_action('admin_notices', function () {
 });
 
 /**
+ * Who signed a timesheet compared with whose sheet it is, so the record shows it plainly:
+ * - on_behalf:     someone other than the employee submitted it (e.g. their manager filled it in)
+ * - self_approved: the approver is the employee on the sheet
+ * - same_person:   the person who submitted it on the employee's behalf also approved it
+ */
+function tt_signoff_flags($post_id) {
+    $employee = tt_timesheet_employee_id($post_id);
+    $emp_by   = get_post_meta($post_id, 'tt_employee_signed', true) ? intval(get_post_meta($post_id, 'tt_employee_signed_by', true)) : 0;
+    $mgr_by   = get_post_meta($post_id, 'tt_manager_signed', true)  ? intval(get_post_meta($post_id, 'tt_manager_signed_by', true))  : 0;
+    $on_behalf     = $emp_by && $employee && $emp_by !== $employee;
+    $self_approved = $mgr_by && $employee && $mgr_by === $employee;
+    return [
+        'employee'      => $employee,
+        'on_behalf'     => $on_behalf,
+        'self_approved' => $self_approved,
+        'same_person'   => $on_behalf && $mgr_by && $mgr_by === $emp_by,
+    ];
+}
+
+/** Amber label used to flag an unusual sign-off. */
+function tt_signoff_flag_html($text) {
+    return ' <span style="display:inline-block; margin-left:4px; padding:1px 6px; border-radius:3px; background:#fcf0e3; color:#8a4b00; font-size:11px; font-weight:600;">' . esc_html($text) . '</span>';
+}
+
+/**
  * Build the signature block HTML for a timesheet.
  * Used by the front-end view, the content filter, and the PDF generator.
  *
@@ -721,13 +750,22 @@ function tt_build_signature_block( $post_id, $for_pdf = false ) {
         return $u ? esc_html( $u->display_name ) : "User #$uid";
     };
 
+    $flags = tt_signoff_flags( $post_id );
+
     $emp_row = '';
     if ( $emp_signed && $emp_signed_by ) {
+        $emp_who  = $user_name( $emp_signed_by );
+        $emp_cert = 'I certify that the hours and leave reported are accurate and complete.';
+        if ( $flags['on_behalf'] ) {
+            $emp_who .= ' <span style="color:#555;">on behalf of ' . $user_name( $flags['employee'] ) . '</span>'
+                . tt_signoff_flag_html( 'Filed on behalf' );
+            $emp_cert = 'Submitted on the employee\'s behalf by ' . $user_name( $emp_signed_by ) . '. ' . $emp_cert;
+        }
         $emp_row = '<tr style="color:#006622;">'
             . '<td style="padding:10px 14px; border:1px solid #ddd; font-weight:600; white-space:nowrap;">&#10003; Employee</td>'
-            . '<td style="padding:10px 14px; border:1px solid #ddd;">' . $user_name( $emp_signed_by ) . '</td>'
+            . '<td style="padding:10px 14px; border:1px solid #ddd;">' . $emp_who . '</td>'
             . '<td style="padding:10px 14px; border:1px solid #ddd;">' . esc_html( $fmt_dt( $emp_signed_at ) ) . '</td>'
-            . '<td style="padding:10px 14px; border:1px solid #ddd; font-size:11px; color:#555;">I certify that the hours and leave reported are accurate and complete.</td>'
+            . '<td style="padding:10px 14px; border:1px solid #ddd; font-size:11px; color:#555;">' . $emp_cert . '</td>'
             . '</tr>';
     } else {
         $emp_row = '<tr style="color:#999;">'
@@ -738,11 +776,20 @@ function tt_build_signature_block( $post_id, $for_pdf = false ) {
 
     $mgr_row = '';
     if ( $mgr_signed && $mgr_signed_by ) {
+        $mgr_who  = $user_name( $mgr_signed_by );
+        $mgr_cert = 'I have reviewed and approve this timesheet.';
+        if ( $flags['self_approved'] ) {
+            $mgr_who .= tt_signoff_flag_html( 'Self-approved' );
+            $mgr_cert = 'Self-approval: the approver is the employee on this timesheet. ' . $mgr_cert;
+        } elseif ( $flags['same_person'] ) {
+            $mgr_who .= tt_signoff_flag_html( 'Filed and approved by same person' );
+            $mgr_cert = 'The approver also submitted this timesheet on the employee\'s behalf. ' . $mgr_cert;
+        }
         $mgr_row = '<tr style="color:#006622;">'
             . '<td style="padding:10px 14px; border:1px solid #ddd; font-weight:600; white-space:nowrap;">&#10003; Manager</td>'
-            . '<td style="padding:10px 14px; border:1px solid #ddd;">' . $user_name( $mgr_signed_by ) . '</td>'
+            . '<td style="padding:10px 14px; border:1px solid #ddd;">' . $mgr_who . '</td>'
             . '<td style="padding:10px 14px; border:1px solid #ddd;">' . esc_html( $fmt_dt( $mgr_signed_at ) ) . '</td>'
-            . '<td style="padding:10px 14px; border:1px solid #ddd; font-size:11px; color:#555;">I have reviewed and approve this timesheet.</td>'
+            . '<td style="padding:10px 14px; border:1px solid #ddd; font-size:11px; color:#555;">' . $mgr_cert . '</td>'
             . '</tr>';
     } else {
         $mgr_row = '<tr style="color:#999;">'
@@ -1575,7 +1622,9 @@ function tt_ajax_get_my_timesheet(){
         'changes_note' => ($state === 'needs_changes') ? (string)get_post_meta($id,'tt_changes_note',true) : '',
         // For the status line under the form.
         'view_url'     => (get_post_status($id) === 'publish') ? get_permalink($id) : '',
-        'approved_by'  => ($state === 'approved') ? tt_user_display_name(get_post_meta($id,'tt_manager_signed_by',true), '') : '',
+        'approved_by'  => ($state === 'approved')
+            ? tt_user_display_name(get_post_meta($id,'tt_manager_signed_by',true), '') . (tt_signoff_flags($id)['self_approved'] ? ' (self-approved)' : '')
+            : '',
     ]);
 }
 
