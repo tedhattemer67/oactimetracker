@@ -6,7 +6,7 @@ A WordPress plugin for the Ohio Arts Council. Employees fill in and sign biweekl
 
 1. An employee opens the timesheet form, picks a pay period and enters hours for each day. They can save a draft and come back later.
 2. When they're done, they sign and submit it. The sheet locks; they can withdraw it if they need to make changes.
-3. Their manager reviews it on the Manager Dashboard and either **approves** it (adding the manager sign-off) or **requests changes** with a note, which sends it back to the employee.
+3. Their manager reviews it on the Manager Dashboard and either **approves** it (adding the manager sign-off) or **requests changes** with a note, which sends it back to the employee. A manager who approved a sheet by mistake can **un-approve** it, which works the same way as requesting changes: it removes the approval and both signatures and sends the sheet back with a note.
 4. Approved timesheets can be viewed and downloaded as PDFs.
 
 Pay periods are two weeks long, Sunday to Saturday. They count forward from Sunday, January 11, 2026.

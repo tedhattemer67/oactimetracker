@@ -1622,18 +1622,25 @@ function tt_render_timesheet_content_from_meta($content){
         $actions_html .= ' <a class="button" href="'.esc_url($withdraw_url).'" onclick="return confirm(\'Withdraw submission and return to Draft?\');">Withdraw Submission</a>';
     }
 
-    // Assigned manager/Admin: Approve / Request Changes (only while submitted — matches tt_manager_action_handler)
+    // Assigned manager/Admin: Approve + Request Changes while submitted; on an approved sheet,
+    // Un-approve & Send Back (same handler, see tt_manager_action_handler).
     $changes_form = '';
-    if( tt_user_can_manage_timesheet($post->ID) && $state === 'submitted' ){
-        $approve_url = wp_nonce_url(admin_url('admin-post.php?action=tt_manager_action&do=approve&timesheet_id='.$post->ID), 'tt_manager_action_approve_'.$post->ID);
-        $actions_html .= ' <a class="button button-primary" href="'.esc_url($approve_url).'" onclick="return confirm(\'Approve this timesheet?\');">Approve</a>';
-        // Request Changes: the manager must say what to fix; the employee makes the corrections.
-        $changes_form = '<details id="tt-request-changes" style="margin-top:10px;"><summary class="button" style="display:inline-block;cursor:pointer;">Request Changes</summary>'
-            .'<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="margin-top:8px;">'
+    if( tt_user_can_manage_timesheet($post->ID) && in_array($state, ['submitted','approved'], true) ){
+        $is_approved = ($state === 'approved');
+        if(!$is_approved){
+            $approve_url = wp_nonce_url(admin_url('admin-post.php?action=tt_manager_action&do=approve&timesheet_id='.$post->ID), 'tt_manager_action_approve_'.$post->ID);
+            $actions_html .= ' <a class="button button-primary" href="'.esc_url($approve_url).'" onclick="return confirm(\'Approve this timesheet?\');">Approve</a>';
+        }
+        // The manager must say what to fix; the employee makes the corrections.
+        $changes_form = '<details id="tt-request-changes" style="margin-top:10px;"><summary class="button" style="display:inline-block;cursor:pointer;">'
+            .($is_approved ? 'Un-approve &amp; Send Back' : 'Request Changes').'</summary>'
+            .'<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="margin-top:8px;"'
+            .($is_approved ? ' onsubmit="return confirm(\'Withdraw your approval and send this timesheet back to the employee?\');"' : '').'>'
             .'<input type="hidden" name="action" value="tt_manager_action">'
             .'<input type="hidden" name="do" value="request_changes">'
             .'<input type="hidden" name="timesheet_id" value="'.intval($post->ID).'">'
             .wp_nonce_field('tt_manager_action_request_changes_'.$post->ID, '_wpnonce', true, false)
+            .($is_approved ? '<p style="margin:0 0 6px;">This removes your approval and both signatures. The employee gets an email with your note, makes the changes and resubmits, and then you approve it again.</p>' : '')
             .'<label for="tt-changes-note" style="display:block;font-weight:600;">What needs to change?</label>'
             .'<textarea id="tt-changes-note" name="tt_changes_note" rows="3" required style="width:100%;max-width:600px;"></textarea>'
             .'<p><button type="submit" class="button">Send back to employee</button></p>'
@@ -1730,9 +1737,12 @@ function tt_manager_action_handler(){
     if(!$p || $p->post_type!=='timesheet') wp_die('Not found');
     $uid = get_current_user_id();
     if(!tt_user_can_manage_timesheet($tsid)) wp_die('Not allowed');
-    // Only a submitted sheet can be approved or sent back (a draft or needs_changes sheet
-    // has no current employee signature).
-    if(get_post_meta($tsid,'tt_state',true) !== 'submitted') wp_die('Only submitted timesheets can be approved or sent back.');
+    // Approve needs a submitted sheet (a draft or needs_changes sheet has no current employee
+    // signature). Sending back also works on an approved sheet, so a manager can undo an
+    // approval made by mistake: it clears the approval and returns the sheet to the employee.
+    $state_before = get_post_meta($tsid,'tt_state',true);
+    if($action === 'approve' && $state_before !== 'submitted') wp_die('Only submitted timesheets can be approved.');
+    if($action === 'request_changes' && !in_array($state_before, ['submitted','approved'], true)) wp_die('Only submitted or approved timesheets can be sent back.');
 
     if($action === 'approve'){
         update_post_meta($tsid,'tt_state','approved');
@@ -1757,7 +1767,7 @@ function tt_manager_action_handler(){
         delete_post_meta($tsid, 'tt_manager_signed');
         delete_post_meta($tsid, 'tt_manager_signed_at');
         delete_post_meta($tsid, 'tt_manager_signed_by');
-        tt_notify_employee_changes_requested($tsid, $note);
+        tt_notify_employee_changes_requested($tsid, $note, $state_before === 'approved');
     } else {
         wp_die('Unknown action');
     }
@@ -1839,16 +1849,23 @@ function tt_notify_manager_submitted($tsid, $employee_uid) {
     return tt_send_mail($manager_id, $subject, $body);
 }
 
-/** To the employee: their manager (or an admin's edit) sent the sheet back, with the note. */
-function tt_notify_employee_changes_requested($tsid, $note) {
+/**
+ * To the employee: their manager (or an admin's edit) sent the sheet back, with the note.
+ * $was_approved: the sheet had been approved, so say the approval was withdrawn.
+ */
+function tt_notify_employee_changes_requested($tsid, $note, $was_approved = false) {
     $employee_uid = tt_timesheet_employee_id($tsid);
     $period   = tt_period_label($tsid);
     $reviewer = tt_user_display_name(get_current_user_id());
     $fix_url  = add_query_arg(['pay_period' => get_post_meta($tsid, 'tt_period_start', true), 'timesheet_id' => $tsid], home_url('/'));
 
-    $subject = "Changes requested on your timesheet for $period";
+    $subject = $was_approved
+        ? "Approval withdrawn: changes needed on your timesheet for $period"
+        : "Changes requested on your timesheet for $period";
     $body = "Hello " . tt_user_display_name($employee_uid, 'there') . ",\n\n"
-        . "$reviewer sent your timesheet for $period back to you for changes:\n\n"
+        . ($was_approved
+            ? "$reviewer withdrew their approval of your timesheet for $period and sent it back to you for changes:\n\n"
+            : "$reviewer sent your timesheet for $period back to you for changes:\n\n")
         . $note . "\n\n"
         . "Make the corrections, check the certification box and submit it again:\n" . $fix_url . "\n";
     return tt_send_mail($employee_uid, $subject, $body);
@@ -2393,6 +2410,9 @@ function tt_render_manager_dashboard($base_url) {
                             <a class="button button-small button-primary" href="<?php echo esc_url($approve_url); ?>"
                                onclick="return confirm('Approve this timesheet?');">Approve</a>
                             <a class="button button-small" href="<?php echo esc_url($chg_url); ?>">Request Changes</a>
+                        <?php elseif ($state === 'approved'): ?>
+                            <?php // Undo a mistaken approval: opens the send-back form (with its note) on the timesheet page. ?>
+                            <a class="button button-small" href="<?php echo esc_url($chg_url); ?>">Un-approve</a>
                         <?php endif; ?>
                     <?php endif; ?>
                 </td>
