@@ -1,7 +1,5 @@
 (function($){
   $(function(){
-    console.log('TT script loaded');
-
     const MS_DAY = 24*60*60*1000;
     const anchor = new Date(2026, 0, 11); // Sun, 01/11/2026 (month is 0-based)
     anchor.setHours(0,0,0,0);
@@ -23,12 +21,15 @@
     const timeBody = $('#time-grid .time-body');
     const ptoBody = $('#pto-grid .pto-body');
 
+    // Lists the 2 previous periods (people often fill in a sheet just after its period ends),
+    // the current one (selected by default) and the next 7.
+    const PAST_PERIODS = 2;
     function buildDropdown(){
       sel.empty();
       let diff = daysBetween(today, anchor);
       let cur = Math.floor(diff/14);
       if(cur<0)cur=0;
-      for(let i=cur;i<cur+8;i++){
+      for(let i=Math.max(0, cur-PAST_PERIODS);i<cur+8;i++){
         let st = addDays(anchor, i*14);
       if(st.getDay() !== 0){
         const delta = (7 - st.getDay()) % 7; // Saturday->+1
@@ -38,7 +39,7 @@
         let en = addDays(st, 13);
         let val = `${st.getFullYear()}-${String(st.getMonth()+1).padStart(2,'0')}-${String(st.getDate()).padStart(2,'0')}`;
         let txt = `${st.getMonth()+1}/${st.getDate()}/${st.getFullYear()} – ${en.getMonth()+1}/${en.getDate()}/${en.getFullYear()}`;
-        sel.append($('<option>').val(val).text(txt));
+        sel.append($('<option>').val(val).text(txt).prop('selected', i === cur));
       }
     }
 
@@ -91,6 +92,12 @@
         let total=0;
         total += ttShiftHours($(this).find('.in1'), $(this).find('.out1'));
         total += ttShiftHours($(this).find('.in2'), $(this).find('.out2'));
+        // The two shifts may touch (Out 1 = In 2) but not overlap. Times are HH:MM, so
+        // string comparison orders them correctly.
+        const $in2 = $(this).find('.in2'), el2 = $in2.get(0);
+        const overlap = !!(in1 && out1 && in2 && out2 && out1 > in1 && out2 > in2 && in1 < out2 && in2 < out1);
+        if(el2 && el2.setCustomValidity) el2.setCustomValidity(overlap ? 'Shift 2 overlaps shift 1.' : '');
+        if(overlap) $in2.css('outline', '2px solid #d63638');
         $(this).find('.hours-total').text(total.toFixed(2));
         let ptoRow = $('#pto-grid .pto-body tr').eq(i);
         ptoRow.find('.pto-reg').text(total.toFixed(2));
@@ -368,8 +375,9 @@
     // ── Clear Form ──────────────────────────────────────────────────────────
     // Rebuilds both grids with blank inputs for the currently selected period,
     // resets the hidden timesheet ID and status text, and unchecks the certify
-    // checkbox. Does NOT delete anything from the server — it only clears the
-    // on-screen form so the user can start fresh before saving or submitting.
+    // checkbox. Nothing on the server changes until the user saves — but saving then
+    // replaces this period's saved sheet (the server finds it by employee + period),
+    // so the confirm message says so.
     function ttClearForm(){
       const currentPeriod = sel.val();
       if(!currentPeriod) return;
@@ -402,7 +410,7 @@
     const clearBtn = document.getElementById('tt-clear-btn');
     if(clearBtn){
       clearBtn.addEventListener('click', function(){
-        if(confirm('Clear all entered hours and start a blank form for this pay period?\n\nThis will not delete anything already saved — it only clears what you see on screen.')){
+        if(confirm('Clear all entered hours for this pay period?\n\nThis only clears the screen. If you then Save Draft or Submit, the blank form REPLACES the timesheet already saved for this period. To keep your saved sheet, reload the page instead of saving.')){
           ttClearForm();
         }
       });

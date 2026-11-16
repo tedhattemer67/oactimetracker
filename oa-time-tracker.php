@@ -8,25 +8,10 @@ Author: Ted Hattemer
 require_once __DIR__ . '/vendor/dompdf/autoload.inc.php';
 use Dompdf\Dompdf;
 
-// Register Employee CPT
-add_action('init','tt_register_employee_cpt');
-function tt_register_employee_cpt(){
-    $labels = [
-        'name'=>'Employees','singular_name'=>'Employee',
-        'add_new_item'=>'Add New Employee','edit_item'=>'Edit Employee',
-        'new_item'=>'New Employee','all_items'=>'All Employees',
-        'menu_name'=>'Employees',
-    ];
-    $args = [
-        'labels'=>$labels,'public'=>false,'show_ui'=>true,
-        'capability_type'=>'post','supports'=>['title'],
-        'menu_icon'=>'dashicons-businessperson',
-    ];
-    register_post_type('employee',$args);
-}
+// Employees are WordPress users. (An unused "employee" post type used to be registered
+// here; it was removed. Any old employee posts stay in the database, just hidden.)
 register_activation_hook(__FILE__,'tt_activation');
 function tt_activation(){
-    tt_register_employee_cpt();
     tt_register_timesheet_cpt();
     flush_rewrite_rules();
 }
@@ -263,6 +248,12 @@ function ttc_handle_submission(){
             .implode('</li><li>', array_map('esc_html', $time_errors)).'</li></ul>', 'Invalid times', ['response' => 400]);
     }
 
+    // Submitting is the employee's signature, so the certification box must be ticked
+    // (the JS checks this first; this is the backstop).
+    if($tt_action !== 'draft' && empty($_POST['tt_employee_certify'])){
+        wp_die('Please check the certification box before submitting (use your browser\'s Back button to return to the form).', 'Certification required', ['response' => 400]);
+    }
+
     // Determine whose timesheet this is. Admins and managers may pick an employee in
     // the dropdown (sent as employee_user_id_override); managers only for their own
     // assigned employees. Everyone else always files for themselves.
@@ -338,12 +329,12 @@ function ttc_handle_submission(){
             'out1' => sanitize_text_field($_POST["time_out_1_$i"] ?? ''),
             'in2'  => sanitize_text_field($_POST["time_in_2_$i"] ?? ''),
             'out2' => sanitize_text_field($_POST["time_out_2_$i"] ?? ''),
-            'vac'  => floatval($_POST["vacation_$i"] ?? 0),
-            'sick' => floatval($_POST["sick_$i"] ?? 0),
-            'pers' => floatval($_POST["personal_$i"] ?? 0),
-            'hol'  => floatval($_POST["holiday_$i"] ?? 0),
-            'unp'  => floatval($_POST["unpaid_$i"] ?? 0),
-            'ot'   => floatval($_POST["overtime_$i"] ?? 0),
+            'vac'  => tt_clean_hours($_POST["vacation_$i"] ?? 0),
+            'sick' => tt_clean_hours($_POST["sick_$i"] ?? 0),
+            'pers' => tt_clean_hours($_POST["personal_$i"] ?? 0),
+            'hol'  => tt_clean_hours($_POST["holiday_$i"] ?? 0),
+            'unp'  => tt_clean_hours($_POST["unpaid_$i"] ?? 0),
+            'ot'   => tt_clean_hours($_POST["overtime_$i"] ?? 0),
         ];
     }
     $tt_data = [
@@ -694,7 +685,7 @@ add_action('admin_notices', function () {
         echo '<div class="notice notice-warning is-dismissible"><p>The hours changed on a submitted/approved timesheet, so it was sent back to the employee as <strong>Needs Changes</strong> and both signatures were cleared. They need to review and resubmit it, then the manager approves it again.</p></div>';
     }
     if (in_array('invalid_times', $codes, true)) {
-        echo '<div class="notice notice-error is-dismissible"><p>Your changes to the timesheet hours were <strong>not</strong> saved: every Time Out must be later than its Time In (overnight shifts aren\'t allowed). Re-enter the changes and update again.</p></div>';
+        echo '<div class="notice notice-error is-dismissible"><p>Your changes to the timesheet hours were <strong>not</strong> saved: every Time Out must be later than its Time In (overnight shifts aren\'t allowed), and a day\'s two shifts can\'t overlap. Re-enter the changes and update again.</p></div>';
     }
     if (in_array('period_conflict', $codes, true)) {
         echo '<div class="notice notice-error is-dismissible"><p>The period start was <strong>not</strong> changed: this employee already has a timesheet for that pay period. Edit that timesheet instead.</p></div>';
@@ -868,16 +859,23 @@ function tt_sanitize_timesheet($data) {
             'out1' => sanitize_text_field($row['out1'] ?? ''),
             'in2'  => sanitize_text_field($row['in2']  ?? ''),
             'out2' => sanitize_text_field($row['out2'] ?? ''),
-            'vac'  => floatval($row['vac']  ?? 0),
-            'sick' => floatval($row['sick'] ?? 0),
-            'pers' => floatval($row['pers'] ?? 0),
-            'hol'  => floatval($row['hol']  ?? 0),
-            'unp'  => floatval($row['unp']  ?? 0),
-            'ot'   => floatval($row['ot']   ?? 0),
+            'vac'  => tt_clean_hours($row['vac']  ?? 0),
+            'sick' => tt_clean_hours($row['sick'] ?? 0),
+            'pers' => tt_clean_hours($row['pers'] ?? 0),
+            'hol'  => tt_clean_hours($row['hol']  ?? 0),
+            'unp'  => tt_clean_hours($row['unp']  ?? 0),
+            'ot'   => tt_clean_hours($row['ot']   ?? 0),
         ];
         $out['days'][$i] = $one;
     }
     return $out;
+}
+
+/** A leave/overtime hours value: 0–24, rounded to the nearest half hour (as the form offers). */
+function tt_clean_hours($v) {
+    $h = is_numeric($v) ? (float)$v : 0.0;
+    $h = min(24.0, max(0.0, $h));
+    return round($h * 2) / 2;
 }
 
 function tt_time_to_hours($t) {
@@ -911,6 +909,16 @@ function tt_validate_time_pairs($days, $require_complete = false) {
             } elseif ($b <= $a) {
                 $errors[] = "$label, shift $n: Time Out ($out) must be later than Time In ($in).";
             }
+        }
+        // The day's two shifts may touch (Out 1 = In 2) but not overlap.
+        $s = [];
+        foreach ([1, 2] as $n) {
+            $a = tt_time_to_hours($d["in$n"] ?? '');
+            $b = tt_time_to_hours($d["out$n"] ?? '');
+            if ($a !== null && $b !== null && $b > $a) $s[$n] = [$a, $b];
+        }
+        if (count($s) === 2 && $s[1][0] < $s[2][1] && $s[2][0] < $s[1][1]) {
+            $errors[] = "$label: shift 1 and shift 2 overlap.";
         }
     }
     return $errors;
@@ -1489,7 +1497,11 @@ function tt_my_timesheets_shortcode($atts = []){
         if($start){
             echo '<a class="button" href="'.esc_url($continue_url).'">Continue</a> ';
         }
-        echo '<a class="button" href="'.esc_url($view_url).'">View</a>';
+        // WordPress only shows draft posts to users who can edit them, so for most employees
+        // View would 404 on a draft; Continue opens it in the form instead.
+        if(get_post_status($id) === 'publish' || current_user_can('edit_post', $id)){
+            echo '<a class="button" href="'.esc_url($view_url).'">View</a>';
+        }
         echo '</td>';
         echo '</tr>';
     }
@@ -1555,146 +1567,6 @@ function tt_ajax_get_my_timesheet(){
 
 
 
-// ── Shared helper: build one page of the "My Timesheets" table rows + pagination bar ──
-function tt_build_timesheets_table_html($form_url, $paged = 1, $per_page = 10){
-    $paged    = max(1, intval($paged));
-    $per_page = max(1, intval($per_page));
-
-    $q = new WP_Query([
-        'post_type'      => 'timesheet',
-        'author'         => get_current_user_id(),
-        'post_status'    => ['draft','publish'],
-        'posts_per_page' => $per_page,
-        'paged'          => $paged,
-        'orderby'        => 'modified',
-        'order'          => 'DESC',
-    ]);
-
-    if(!$q->have_posts()) return ['html'=>'', 'total_pages'=>0, 'paged'=>$paged];
-
-    $total_pages = intval($q->max_num_pages);
-    $badge_color = ['draft'=>'#888','submitted'=>'#0073aa','approved'=>'#46b450','needs_changes'=>'#d54e21'];
-
-    ob_start();
-    echo '<table class="widefat striped tt-timesheets-table"><thead><tr><th>Pay Period</th><th>Status</th><th>Last Updated</th><th>Actions</th></tr></thead><tbody>';
-    while($q->have_posts()){
-        $q->the_post();
-        $id    = get_the_ID();
-        $start = get_post_meta($id,'tt_period_start', true);
-        // Fallback: check tt_data for period_start
-        if(!$start){
-            $d = get_post_meta($id,'tt_data',true);
-            if(is_array($d) && !empty($d['period_start'])) $start = $d['period_start'];
-        }
-        $state = get_post_meta($id,'tt_state', true);
-        if(!$state){ $state = (get_post_status($id)==='draft') ? 'draft' : 'submitted'; }
-        $end = '';
-        if($start){
-            $dt = DateTime::createFromFormat('Y-m-d', $start);
-            if($dt){ $dt->modify('+13 days'); $end = $dt->format('Y-m-d'); }
-        }
-        $period       = $start ? (esc_html($start).' – '.esc_html($end)) : esc_html(get_the_title());
-        $continue_url = $start ? add_query_arg(['pay_period'=>$start,'timesheet_id'=>$id], $form_url) : $form_url;
-        $color        = $badge_color[$state] ?? '#888';
-        echo '<tr>';
-        echo '<td>'.$period.'</td>';
-        echo '<td><span style="display:inline-block;padding:2px 8px;border-radius:999px;background:'.esc_attr($color).';color:#fff;font-size:0.85em;">'.esc_html(ucwords(str_replace('_',' ',$state))).'</span></td>';
-        echo '<td>'.esc_html(get_the_modified_date('Y-m-d g:ia')).'</td>';
-        echo '<td>';
-        if($start){ echo '<a class="button" href="'.esc_url($continue_url).'">Continue</a> '; }
-        echo '<a class="button" href="'.esc_url(get_permalink($id)).'">View</a>';
-        echo '</td>';
-        echo '</tr>';
-    }
-    wp_reset_postdata();
-    echo '</tbody></table>';
-
-    // Pagination bar
-    if($total_pages > 1){
-        echo '<div class="tt-inline-pagination" style="margin-top:8px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">';
-        // Prev
-        if($paged > 1){
-            echo '<button class="button tt-ts-page" data-page="'.($paged-1).'" style="padding:4px 10px;">&laquo; Prev</button>';
-        }
-        for($p = 1; $p <= $total_pages; $p++){
-            $active = ($p === $paged);
-            $style  = $active
-                ? 'padding:4px 10px;border-radius:4px;background:#0073aa;color:#fff;border:none;font-weight:bold;cursor:default;'
-                : 'padding:4px 10px;border-radius:4px;background:#f0f0f0;color:#333;border:1px solid #ccc;cursor:pointer;';
-            echo '<button class="button tt-ts-page" data-page="'.esc_attr($p).'" style="'.esc_attr($style).'" '.($active?'disabled':'').'>'.esc_html($p).'</button>';
-        }
-        // Next
-        if($paged < $total_pages){
-            echo '<button class="button tt-ts-page" data-page="'.($paged+1).'" style="padding:4px 10px;">Next &raquo;</button>';
-        }
-        echo '<span style="color:#666;font-size:0.9em;margin-left:4px;">Page '.esc_html($paged).' of '.esc_html($total_pages).'</span>';
-        echo '</div>';
-    }
-
-    return ['html'=>ob_get_clean(), 'total_pages'=>$total_pages, 'paged'=>$paged];
-}
-
-// ── Inline render (called from the employee form shortcode output) ──
-function tt_render_my_timesheets_inline($form_url){
-    $result = tt_build_timesheets_table_html($form_url, 1, 5);
-    if(!$result['html']) return '';
-
-    $nonce = wp_create_nonce('tt_ajax_nonce');
-    ob_start();
-    echo '<div class="tt-my-timesheets" style="margin:16px 0;" ';
-    echo '     data-form-url="'.esc_attr($form_url).'" ';
-    echo '     data-nonce="'.esc_attr($nonce).'" ';
-    echo '     data-per-page="5">';
-    echo '<h4>My Timesheets</h4>';
-    echo '<div class="tt-timesheets-body">'.$result['html'].'</div>';
-    echo '</div>';
-    // Inline script: delegate pagination clicks to AJAX
-    echo '<script>
-(function(){
-    document.addEventListener("click", function(e){
-        var btn = e.target.closest(".tt-ts-page");
-        if(!btn) return;
-        var wrap = btn.closest(".tt-my-timesheets");
-        if(!wrap) return;
-        e.preventDefault();
-        var page     = btn.getAttribute("data-page");
-        var formUrl  = wrap.getAttribute("data-form-url");
-        var nonce    = wrap.getAttribute("data-nonce");
-        var perPage  = wrap.getAttribute("data-per-page") || 10;
-        var body     = wrap.querySelector(".tt-timesheets-body");
-        body.style.opacity = "0.5";
-        var fd = new FormData();
-        fd.append("action",   "tt_paginate_my_timesheets");
-        fd.append("nonce",    nonce);
-        fd.append("paged",    page);
-        fd.append("per_page", perPage);
-        fd.append("form_url", formUrl);
-        fetch(TT_AJAX.ajax_url, {method:"POST", body:fd, credentials:"same-origin"})
-            .then(function(r){ return r.json(); })
-            .then(function(res){
-                if(res.success && res.data && res.data.html){
-                    body.innerHTML = res.data.html;
-                }
-                body.style.opacity = "1";
-            })
-            .catch(function(){ body.style.opacity = "1"; });
-    });
-})();
-</script>';
-    return ob_get_clean();
-}
-
-// ── AJAX handler for inline pagination ──
-add_action('wp_ajax_tt_paginate_my_timesheets', 'tt_ajax_paginate_my_timesheets');
-function tt_ajax_paginate_my_timesheets(){
-    check_ajax_referer('tt_ajax_nonce','nonce');
-    if(!is_user_logged_in()){ wp_send_json_error('not_logged_in', 403); }
-    $paged    = max(1, intval($_POST['paged']   ?? 1));
-    $per_page = max(1, intval($_POST['per_page'] ?? 10));
-    $form_url = esc_url_raw($_POST['form_url']  ?? home_url('/'));
-    $result   = tt_build_timesheets_table_html($form_url, $paged, $per_page);
-    wp_send_json_success(['html'=>$result['html'], 'paged'=>$result['paged'], 'total_pages'=>$result['total_pages']]);
-}
 
 
 
@@ -2120,16 +1992,8 @@ add_filter('login_redirect', function($redirect_to, $requested, $user) {
 // === ADMIN: Assign Manager role users as managers on user profile =============
 // =============================================================================
 
-// Extend the manager dropdown to include tt_manager role users (not just editors/admins)
-add_action('show_user_profile', 'tt_user_profile_manager_field_v2', 11);
-add_action('edit_user_profile', 'tt_user_profile_manager_field_v2', 11);
-function tt_user_profile_manager_field_v2($user) {
-    // Remove the old hook output by hooking later; this replaces it
-    // (The original function still runs at priority 10, so we output nothing extra here —
-    //  instead we patch the manager query below via a filter.)
-}
-
-// Override the managers query in the original profile field to include tt_manager role
+// Extend the manager dropdown to include tt_manager role users (not just editors/admins):
+// override the managers query in the original profile field to include tt_manager role
 add_filter('pre_get_users', 'tt_expand_manager_query');
 function tt_expand_manager_query($query) {
     // Only intercept the specific query in tt_user_profile_manager_field

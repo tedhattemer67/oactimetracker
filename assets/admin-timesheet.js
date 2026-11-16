@@ -32,6 +32,13 @@
       var $tr = $(this);
       markPair($tr.find('.tt-in1'), $tr.find('.tt-out1'));
       markPair($tr.find('.tt-in2'), $tr.find('.tt-out2'));
+      // The two shifts may touch but not overlap (the server refuses the save otherwise).
+      var a1 = parseTime($tr.find('.tt-in1').val()), b1 = parseTime($tr.find('.tt-out1').val());
+      var a2 = parseTime($tr.find('.tt-in2').val()), b2 = parseTime($tr.find('.tt-out2').val());
+      var overlap = a1 != null && b1 != null && a2 != null && b2 != null && b1 > a1 && b2 > a2 && a1 < b2 && a2 < b1;
+      var in2 = $tr.find('.tt-in2').get(0);
+      if(in2 && in2.setCustomValidity) in2.setCustomValidity(overlap ? 'Shift 2 overlaps shift 1.' : '');
+      $tr.find('.tt-in2').css('outline', overlap ? '2px solid #d63638' : '');
       var h = spanHours($tr.find('.tt-in1').val(), $tr.find('.tt-out1').val()) +
               spanHours($tr.find('.tt-in2').val(), $tr.find('.tt-out2').val());
       var v = num($tr.find('.tt-vac').val());
