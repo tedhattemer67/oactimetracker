@@ -23,6 +23,25 @@ Plain-text emails go out from `communications@ohioartscouncil.org` (sent through
 
 Emails go to the address on each user's WordPress account. Nobody is emailed about their own action, and nothing is sent to a manager for an employee who has no manager assigned. A failed send never blocks the action. To change the sender, use the `tt_mail_from` filter. It must match the account WP Mail SMTP is authenticated as.
 
+## History and Activity Log
+
+Every timesheet action is recorded in a permanent audit log:
+
+| Event | What's recorded |
+|---|---|
+| Draft saved / submitted | Total hours, whether it was filed on someone's behalf, and the before → after value of every cell that changed |
+| Withdrawn | Who withdrew it and when |
+| Approved | Total hours, and whether it was a self-approval or approved by the person who filed it |
+| Changes requested / un-approved | The full note |
+| Edited by admin | Every changed cell, any pay-period move, old → new total, whether it reopened the sheet, and the admin's note |
+| Moved to trash / restored / deleted | Its status and total at the time |
+| Manager assignment changed | Old and new manager (from the user profile) |
+
+- **On each timesheet**, a **History** section under the signatures lists that sheet's entries, oldest first. Whoever can view the sheet sees it: the employee, their manager and admins. It appears on the website only; it's left out of printouts and both kinds of PDF. The admin editor shows it too.
+- **Timesheets → Activity Log** (admins only) lists every entry, newest first, filterable by employee, who did it, event type, pay period and date range, with **Export CSV**.
+
+Entries live in their own database table (`wp_tt_audit_log`), so they remain after a timesheet or user is deleted. Nothing in WordPress can edit or delete them; the one exception is the demo seeder's **clear** command, which removes entries about demo users and demo sheets. Activity from before the log was added isn't available.
+
 ## Installation
 
 1. Copy this folder to `wp-content/plugins/` (or upload it as a zip under **Plugins → Add New → Upload Plugin**).
@@ -51,6 +70,7 @@ Emails go to the address on each user's WordPress account. Nobody is emailed abo
 
 - **Timesheets**: all timesheets, with an editor for each one.
 - **Timesheets → Manager Dashboard / My Team**: wp-admin versions of the manager views.
+- **Timesheets → Activity Log**: the audit log of every timesheet action, with filters and CSV export.
 - **Timesheets → Settings**: the URLs of the My Timesheets and Manager Dashboard pages.
 
 ## PDF downloads
@@ -71,6 +91,7 @@ These are separate plugins, kept in this repo but installed on their own.
 | Path | Contents |
 |---|---|
 | `oa-time-tracker.php` | The plugin: data model, form handling, approvals, admin pages and PDFs |
+| `includes/tt-audit-log.php` | The audit log: its table, logging, the History section and the Activity Log page |
 | `js/tt-time-tracker.js` | Timesheet form behavior and pay-period calculation |
 | `js/pdf-print.js` | PDF download in the browser |
 | `assets/` | Admin timesheet editor script and styles |

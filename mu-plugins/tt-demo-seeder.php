@@ -203,6 +203,18 @@ function tt_demo_clear() {
     }
     foreach ($post_ids as $id) wp_delete_post($id, true);
     foreach ($user_ids as $id) wp_delete_user($id);
+
+    // Remove Activity Log entries about demo sheets and demo users (including the "deleted"
+    // entries just written above), so demo activity doesn't stay in the real audit log.
+    // This is the only place anything removes audit log entries.
+    if (function_exists('tt_audit_table')) {
+        global $wpdb;
+        $ids = function ($a) { return implode(',', array_map('intval', $a)); };
+        $or  = [];
+        if ($post_ids) $or[] = 'timesheet_id IN (' . $ids($post_ids) . ')';
+        if ($user_ids) $or[] = 'employee_id IN (' . $ids($user_ids) . ') OR actor_id IN (' . $ids($user_ids) . ')';
+        if ($or) $wpdb->query('DELETE FROM ' . tt_audit_table() . ' WHERE ' . implode(' OR ', $or));
+    }
     return ['users' => count($user_ids), 'timesheets' => count($post_ids)];
 }
 

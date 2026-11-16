@@ -7,12 +7,14 @@ Author: Ted Hattemer
 */
 require_once __DIR__ . '/vendor/dompdf/autoload.inc.php';
 use Dompdf\Dompdf;
+require_once __DIR__ . '/includes/tt-audit-log.php';
 
 // Employees are WordPress users. (An unused "employee" post type used to be registered
 // here; it was removed. Any old employee posts stay in the database, just hidden.)
 register_activation_hook(__FILE__,'tt_activation');
 function tt_activation(){
     tt_register_timesheet_cpt();
+    tt_audit_install();
     flush_rewrite_rules();
 }
 register_deactivation_hook(__FILE__,'tt_deactivation');
@@ -336,6 +338,7 @@ function ttc_handle_submission(){
         'days'         => $tt_days
     ];
     update_post_meta($post_id,'employee_user_id', $target_uid); // use target, not submitter
+    $prev_data  = $existing_id ? get_post_meta($post_id,'tt_data',true) : null; // for the audit log
     $prev_state = get_post_meta($post_id,'tt_state',true);
     $new_state = ($tt_action === 'draft' ? ($prev_state==='needs_changes' ? 'needs_changes' : 'draft') : 'submitted');
     update_post_meta($post_id,'tt_state', $new_state);
@@ -366,6 +369,18 @@ function ttc_handle_submission(){
     $html = tt_build_timesheet_html($tt_data, $tt_totals);
     if($html){
         wp_update_post(['ID'=>$post_id,'post_content'=>$html]);
+    }
+
+    // Audit log. A draft re-save with nothing changed isn't worth an entry; a submit always is.
+    $audit_created = !$existing_id || !is_array($prev_data);
+    $audit_changes = $audit_created ? [] : tt_audit_diff($prev_data, $tt_data);
+    if($new_state === 'submitted' || $audit_created || $audit_changes){
+        tt_audit_log($new_state === 'submitted' ? 'submitted' : 'draft_saved', $post_id, array_filter([
+            'created'   => $audit_created,
+            'on_behalf' => $uid !== $target_uid,
+            'total'     => tt_audit_total($tt_totals),
+            'changes'   => $audit_changes,
+        ], function($v){ return $v !== false && $v !== []; }), $target_uid);
     }
 
     // Let the employee's manager know there's a sheet to approve.
@@ -633,6 +648,7 @@ add_action('save_post_timesheet', function ($post_id) {
     $changed = !$old || $new_start !== $old_start || $hours_only($old['days']) != $hours_only($clean['days']);
 
     $totals = tt_calculate_totals($clean);
+    $old_totals = get_post_meta($post_id, 'tt_totals', true); // for the audit log
     update_post_meta($post_id, 'tt_data',   $clean);
     update_post_meta($post_id, 'tt_totals', $totals);
     update_post_meta($post_id, 'tt_employee_name', $clean['employee']);
@@ -656,6 +672,20 @@ add_action('save_post_timesheet', function ($post_id) {
         update_post_meta($post_id, 'tt_changes_note', $admin_note);
         update_post_meta($post_id, 'tt_changes_requested_by', get_current_user_id());
         update_post_meta($post_id, 'tt_changes_requested_at', current_time('mysql', true)); // UTC
+    }
+    // Audit log: every changed cell (and supervisor), any period move, and whether it reopened.
+    $audit_changes = tt_audit_diff($old, $clean);
+    // (A note added without changing hours still reaches the employee, so it's logged too.)
+    if ($audit_changes || $new_start !== $old_start || ($state === 'needs_changes' && $admin_note !== '')) {
+        tt_audit_log('admin_edited', $post_id, array_filter([
+            'changes'     => $audit_changes,
+            'period_from' => $new_start !== $old_start ? $old_start : '',
+            'period_to'   => $new_start !== $old_start ? $new_start : '',
+            'total_from'  => tt_audit_total($old_totals),
+            'total_to'    => tt_audit_total($totals),
+            'reopened'    => !empty($reopened),
+            'note'        => $admin_note,
+        ], function ($v) { return $v !== '' && $v !== [] && $v !== false; }));
     }
     if (!empty($reopened)) {
         tt_notify_employee_changes_requested($post_id, $admin_note);
@@ -1715,7 +1745,11 @@ function tt_render_timesheet_content_from_meta($content){
 
     $sig_html = function_exists('tt_build_signature_block') ? tt_build_signature_block( get_the_ID() ) : '';
 
-    return tt_render_nav_bar('') . $actions_html . $title . $table_html . $sig_html;
+    // History (website only; hidden from print and both PDF paths). Anyone who reached this
+    // page passed tt_user_can_view_timesheet: the employee, their manager, or an admin.
+    $history_html = tt_audit_history_html($post->ID);
+
+    return tt_render_nav_bar('') . $actions_html . $title . $table_html . $sig_html . $history_html;
 }
 
 
@@ -1742,7 +1776,15 @@ add_action('personal_options_update','tt_user_profile_manager_field_save');
 add_action('edit_user_profile_update','tt_user_profile_manager_field_save');
 function tt_user_profile_manager_field_save($user_id){
     if(!current_user_can('manage_options')) return;
-    update_user_meta($user_id,'tt_manager_user_id', intval($_POST['tt_manager_user_id'] ?? 0));
+    $old_mgr = intval(get_user_meta($user_id,'tt_manager_user_id',true));
+    $new_mgr = intval($_POST['tt_manager_user_id'] ?? 0);
+    update_user_meta($user_id,'tt_manager_user_id', $new_mgr);
+    if($old_mgr !== $new_mgr){
+        tt_audit_log('manager_changed', 0, [
+            'from_id' => $old_mgr, 'from_name' => $old_mgr ? tt_user_display_name($old_mgr, "User #$old_mgr") : '',
+            'to_id'   => $new_mgr, 'to_name'   => $new_mgr ? tt_user_display_name($new_mgr, "User #$new_mgr") : '',
+        ], $user_id);
+    }
 }
 
 
@@ -1767,6 +1809,7 @@ function tt_employee_withdraw_submission(){
     delete_post_meta($tsid, 'tt_employee_signed');
     delete_post_meta($tsid, 'tt_employee_signed_at');
     delete_post_meta($tsid, 'tt_employee_signed_by');
+    tt_audit_log('withdrawn', $tsid);
     // keep post published so manager can still access history if needed
     wp_safe_redirect(wp_get_referer() ?: get_permalink($tsid));
     exit;
@@ -1799,6 +1842,12 @@ function tt_manager_action_handler(){
         update_post_meta($tsid, 'tt_manager_signed',    1);
         update_post_meta($tsid, 'tt_manager_signed_at', current_time('mysql', true)); // UTC
         update_post_meta($tsid, 'tt_manager_signed_by', $uid);
+        $flags = tt_signoff_flags($tsid);
+        tt_audit_log('approved', $tsid, array_filter([
+            'self_approved' => $flags['self_approved'],
+            'same_person'   => $flags['same_person'],
+            'total'         => tt_audit_total(get_post_meta($tsid, 'tt_totals', true)),
+        ], function($v){ return $v !== false; }));
         tt_notify_employee_approved($tsid);
     } elseif($action === 'request_changes'){
         $note = sanitize_textarea_field(wp_unslash($_POST['tt_changes_note'] ?? ''));
@@ -1816,6 +1865,7 @@ function tt_manager_action_handler(){
         delete_post_meta($tsid, 'tt_manager_signed');
         delete_post_meta($tsid, 'tt_manager_signed_at');
         delete_post_meta($tsid, 'tt_manager_signed_by');
+        tt_audit_log($state_before === 'approved' ? 'unapproved' : 'changes_requested', $tsid, ['note' => $note]);
         tt_notify_employee_changes_requested($tsid, $note, $state_before === 'approved');
     } else {
         wp_die('Unknown action');
