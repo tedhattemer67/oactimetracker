@@ -212,6 +212,42 @@
     
     
     
+    // Status badge under the form: a non-clickable colored label plus a line saying what
+    // (if anything) the employee needs to do. Colors are in time-tracker.css.
+    const TT_STATES = {
+      none:          { label: 'Not started',   help: 'Nothing has been saved for this pay period yet.' },
+      draft:         { label: 'Draft',         help: 'Saved as a draft, not yet sent to your manager. Submit it when it\'s complete.' },
+      needs_changes: { label: 'Needs Changes', help: 'Your manager sent this back. Make the changes, then submit it again.' },
+      submitted:     { label: 'Submitted',     help: 'Sent to your manager and waiting for approval. Nothing more to do. To change it, open the timesheet and choose Withdraw Submission.' },
+      approved:      { label: 'Approved',      help: 'Approved. Nothing more to do: you don\'t need to submit this timesheet again.' },
+    };
+    function ttSetState(state, info){
+      const box = document.getElementById('tt-state');
+      if(!box) return;
+      box.textContent = '';
+      if(!state) return;
+      const s = TT_STATES[state] || { label: state, help: '' };
+      info = info || {};
+      const badge = document.createElement('span');
+      badge.className = 'tt-state-badge tt-state-badge--' + state;
+      badge.textContent = s.label;
+      const help = document.createElement('span');
+      help.className = 'tt-state-help';
+      let text = s.help;
+      if(state === 'approved' && info.approved_by){
+        text = 'Approved by ' + info.approved_by + '. Nothing more to do: you don\'t need to submit this timesheet again.';
+      }
+      help.textContent = text + ' ';
+      if(info.view_url && (state === 'submitted' || state === 'approved')){
+        const a = document.createElement('a');
+        a.href = info.view_url;
+        a.textContent = 'View timesheet';
+        help.appendChild(a);
+      }
+      box.appendChild(badge);
+      box.appendChild(help);
+    }
+
     function ttPopulateFromData(payload){
       if(!payload) return;
 
@@ -302,9 +338,14 @@
         if(el.type === 'hidden') return;
         el.disabled = !!locked;
       });
-      // Disable draft button if locked
-      const draftBtn = document.querySelector('button[name="tt_action"][value="draft"]');
-      if(draftBtn) draftBtn.disabled = !!locked;
+      // A submitted/approved sheet can't be saved, resubmitted or cleared from here (the
+      // server refuses anyway), so turn off every action and hide the certification box.
+      ['button[name="tt_action"][value="draft"]', '#tt-submit-btn', '#tt-clear-btn'].forEach(sel => {
+        const btn = document.querySelector(sel);
+        if(btn) btn.disabled = !!locked;
+      });
+      const certBlock = document.getElementById('tt-certify-block');
+      if(certBlock) certBlock.style.display = locked ? 'none' : '';
     }
 
     function ttLoadMyTimesheet(payPeriod){
@@ -335,6 +376,7 @@
             if(idField) idField.value='';
             ttSetLocked(false);
             ttSetStatus('');
+            ttSetState('none');
             return;
           }
           const tsid = res.data.timesheet_id;
@@ -344,7 +386,8 @@
           ttPopulateFromData(payload);
           const locked = (state === 'submitted' || state === 'approved');
           ttSetLocked(locked);
-          ttSetStatus(locked ? ('Status: '+state) : ('Status: '+state+' (editable)'));
+          ttSetStatus('');
+          ttSetState(state, res.data);
           ttSetChangesNote(res.data.changes_note || '');
         })
         .catch(()=>{});
@@ -355,6 +398,7 @@
     if(pp){
       pp.addEventListener('change', function(){
         const val = this.value;
+        ttSetState(''); // don't show the previous period's status while this one loads
         ttLoadMyTimesheet(val);
       });
     }
@@ -368,6 +412,7 @@
         if(idField) idField.value = '';
         ttSetLocked(false);
         ttSetStatus('');
+        ttSetState('');
         ttLoadMyTimesheet(sel.val());
       });
     }

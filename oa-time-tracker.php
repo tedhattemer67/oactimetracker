@@ -152,6 +152,9 @@ function oac_time_tracker_shortcode(){
       </div>
     </div>
 
+      <?php /* Status badge + what it means for the employee; filled in by tt-time-tracker.js (ttSetState). */ ?>
+      <div id="tt-state" class="tt-state" role="status" aria-live="polite"></div>
+
       <div class="tt-certify-block" id="tt-certify-block" style="margin-top:20px; padding:14px 16px; border:1px solid #c3c4c7; border-radius:6px; background:#f9f9f9; max-width:900px; margin-left:auto; margin-right:auto;">
         <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer;">
           <input type="checkbox" name="tt_employee_certify" id="tt-employee-certify" value="1"
@@ -180,18 +183,7 @@ function oac_time_tracker_shortcode(){
   var certify   = document.getElementById('tt-employee-certify');
   var warning   = document.getElementById('tt-certify-warning');
   var submitBtn = document.getElementById('tt-submit-btn');
-  var certBlock = document.getElementById('tt-certify-block');
-
-  // Hide certification block when sheet is locked (submitted/approved)
-  function syncCertBlock(){
-    var status = (document.getElementById('tt-draft-status') || {}).textContent || '';
-    var locked = (status.indexOf('submitted') !== -1 || status.indexOf('approved') !== -1);
-    if(certBlock) certBlock.style.display = locked ? 'none' : '';
-  }
-  var statusEl = document.getElementById('tt-draft-status');
-  if(statusEl){
-    new MutationObserver(syncCertBlock).observe(statusEl, {childList:true, subtree:true, characterData:true});
-  }
+  // (Locking a submitted/approved sheet, incl. hiding this block, is done by ttSetLocked in tt-time-tracker.js.)
 
   // Intercept submit click — require checkbox
   if(submitBtn){
@@ -1504,7 +1496,8 @@ function tt_my_timesheets_shortcode($atts = []){
         $view_url     = get_permalink($id);
 
         // Status badge colour
-        $badge_color = ['draft'=>'#888','submitted'=>'#0073aa','approved'=>'#46b450','needs_changes'=>'#d54e21'];
+        // Same colors as the status badge on the entry form (css .tt-state-badge--*).
+        $badge_color = ['draft'=>'#d63638','submitted'=>'#2271b1','approved'=>'#008a20','needs_changes'=>'#b35900'];
         $color = $badge_color[$state] ?? '#888';
 
         echo '<tr>';
@@ -1580,6 +1573,9 @@ function tt_ajax_get_my_timesheet(){
         'data' => $data,
         // Manager's note explaining what to fix, while the sheet is sent back.
         'changes_note' => ($state === 'needs_changes') ? (string)get_post_meta($id,'tt_changes_note',true) : '',
+        // For the status line under the form.
+        'view_url'     => (get_post_status($id) === 'publish') ? get_permalink($id) : '',
+        'approved_by'  => ($state === 'approved') ? tt_user_display_name(get_post_meta($id,'tt_manager_signed_by',true), '') : '',
     ]);
 }
 

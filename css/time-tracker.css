@@ -281,6 +281,43 @@
   color: #555;
 }
 
+.tt-submit-actions .button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Status badge under the entry form: looks like a button so it stands out, but isn't one. */
+.tt-state {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  max-width: 900px;
+  margin: 20px auto 0;
+}
+.tt-state:empty {
+  display: none;
+}
+.tt-state-badge {
+  display: inline-block;
+  padding: 7px 18px;
+  border-radius: 4px;
+  background: #646970;
+  color: #fff;
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+  cursor: default;
+  user-select: none;
+}
+.tt-state-badge--approved      { background: #008a20; }
+.tt-state-badge--submitted     { background: #2271b1; }
+.tt-state-badge--needs_changes { background: #b35900; }
+.tt-state-badge--draft         { background: #d63638; }
+.tt-state-help {
+  color: #333;
+}
+
 @media (max-width: 600px) {
   .tt-submit-actions {
     flex-direction: column;
